@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets & env
+.env
+*.pem
+
+# ML / MLOps artifacts
+mlruns/
+mlflow.db
+models/*.pkl
+models/*.joblib
+models/*.csv
+models/index.json
+!models/.gitkeep
+reports/*.json
+!reports/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/monitoring/
+data/screenshots/
+*.dvc.lock
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

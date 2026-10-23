@@ -1,0 +1,33 @@
+# Sandbox image: the only place a browser ever runs.
+# It holds no credentials, has no cloud role and runs as a non-root user.
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY requirements.txt requirements-sandbox.txt ./
+RUN pip install --no-cache-dir -r requirements-sandbox.txt
+
+COPY src ./src
+COPY params.yaml ./
+
+RUN useradd --create-home --uid 10002 sandbox \
+    && mkdir -p /tmp/screenshots \
+    && chown -R sandbox:sandbox /app /tmp/screenshots
+USER sandbox
+
+# Hard limits enforced by the sandbox itself.
+ENV SANDBOX_TIMEOUT_SECONDS=20 \
+    BLOCK_PRIVATE_NETWORKS=true \
+    BROWSER_HEADLESS=true \
+    SCREENSHOT_DIR=/tmp/screenshots
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=4).status == 200 else 1)"
+
+CMD ["uvicorn", "src.sandbox.server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]

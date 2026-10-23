@@ -1,0 +1,147 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # 1) Lint + unit tests
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check src tests --line-length 110
+      - name: Unit tests
+        run: pytest -q --cov=src --cov-report=term-missing --cov-fail-under=60
+
+  # 2) Data validation (proposal: CI runs data validation)
+  data-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Validate raw dataset
+        run: python -c "import pandas as pd; from src.data.validate import validate_urls, assert_valid; assert_valid(validate_urls(pd.read_csv('data/raw/sample_urls.csv')))"
+      - name: Prepare stage (validate, dedupe, split)
+        run: python -m src.data.prepare
+
+  # 3) Safety and prompt-injection tests (proposal: CI runs safety + injection tests)
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Safety and prompt-injection tests
+        run: pytest -q tests/test_checks.py tests/test_safety_and_injection.py -v
+
+  # 4) Train and evaluate the models on the sample dataset
+  train:
+    runs-on: ubuntu-latest
+    needs: [test, data-validation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Prepare, train, evaluate
+        run: |
+          python -m src.data.prepare
+          python -m src.training.train
+          python -m src.training.evaluate
+      - name: Upload reports and models
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-artifacts
+          path: |
+            reports/
+            models/index.json
+            models/*.pkl
+
+  # 5) Container builds (proposal: CI builds the containers)
+  containers:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: false
+          tags: phishing-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sandbox
+          push: false
+          tags: phishing-sandbox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 6) Publish images to ECR (main branch only; requires OIDC role configured)
+  publish:
+    runs-on: ubuntu-latest
+    needs: [train, containers, safety]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.AWS_ROLE_ARN != ''
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Build and push to ECR
+        if: env.AWS_ROLE_ARN != ''
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker build -f Dockerfile.api -t "$REGISTRY/phishing-api:${{ github.sha }}" .
+          docker build -f Dockerfile.sandbox -t "$REGISTRY/phishing-sandbox:${{ github.sha }}" .
+          docker push "$REGISTRY/phishing-api:${{ github.sha }}"
+          docker push "$REGISTRY/phishing-sandbox:${{ github.sha }}"

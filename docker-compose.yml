@@ -1,0 +1,57 @@
+# Local end-to-end stack: API + browser sandbox.
+# The sandbox sits on an internal-only network so the API can reach it but it
+# cannot reach other services.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      SANDBOX_URL: http://sandbox:8080
+      SANDBOX_TIMEOUT_SECONDS: "20"
+      LLM_PROVIDER: ${LLM_PROVIDER:-rule_based}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-anthropic.claude-3-haiku-20240307-v1:0}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-}
+    volumes:
+      - ./models:/app/models:ro
+      - ./reports:/app/reports
+      - events:/app/data/monitoring
+    networks:
+      - backend
+    depends_on:
+      sandbox:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    environment:
+      SANDBOX_TIMEOUT_SECONDS: "20"
+      BLOCK_PRIVATE_NETWORKS: "true"
+      BROWSER_HEADLESS: "true"
+    # Bound resource limits: a hostile page must not exhaust the host.
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m
+    networks:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  events:
+
+networks:
+  backend:
+    driver: bridge
+    internal: false   # needs egress to the public web, but no inbound exposure

@@ -1,0 +1,47 @@
+stages:
+  prepare:
+    cmd: python -m src.data.prepare
+    deps:
+      - src/data/prepare.py
+      - src/data/validate.py
+      - src/features/url_features.py
+      - data/raw/sample_urls.csv
+    params:
+      - params.yaml
+    outs:
+      - data/processed/train.csv
+      - data/processed/test.csv
+      - data/processed/dataset_meta.json
+
+  train:
+    cmd: python -m src.training.train
+    deps:
+      - src/training/train.py
+      - src/training/common.py
+      - src/features/url_features.py
+      - src/features/page_features.py
+      - src/features/featurize.py
+      - data/processed/train.csv
+      - data/processed/test.csv
+      - data/raw/crawled_evidence.jsonl
+    params:
+      - params.yaml
+    outs:
+      - models/url_model.pkl
+      - models/best_model.pkl
+      - models/index.json
+      - models/reference_features.csv
+    metrics:
+      - reports/metrics.json
+
+  evaluate:
+    cmd: python -m src.training.evaluate
+    deps:
+      - src/training/evaluate.py
+      - data/processed/test.csv
+      - data/raw/crawled_evidence.jsonl
+      - models/index.json
+    params:
+      - params.yaml
+    metrics:
+      - reports/evaluation.json

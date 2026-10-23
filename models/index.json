@@ -1,0 +1,169 @@
+{
+  "models": {
+    "url_only": {
+      "model_name": "logistic_regression",
+      "artifact": "url_only__logistic_regression.joblib",
+      "feature_columns": [
+        "url_length",
+        "host_length",
+        "path_length",
+        "query_length",
+        "count_dots",
+        "count_hyphens",
+        "count_underscores",
+        "count_at",
+        "count_question",
+        "count_equals",
+        "count_ampersand",
+        "count_percent",
+        "count_slash",
+        "count_digits",
+        "digit_ratio",
+        "has_ip_host",
+        "has_https",
+        "has_double_slash_redirect",
+        "num_subdomains",
+        "tld_length",
+        "is_shortened",
+        "suspicious_keyword_count",
+        "has_suspicious_tld",
+        "host_entropy",
+        "has_userinfo",
+        "has_port",
+        "is_punycode"
+      ],
+      "metrics": {
+        "accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "confusion_matrix": [
+          [
+            8,
+            0
+          ],
+          [
+            0,
+            9
+          ]
+        ],
+        "roc_auc": 1.0
+      }
+    },
+    "content_only": {
+      "model_name": "random_forest",
+      "artifact": "content_only__random_forest.joblib",
+      "feature_columns": [
+        "redirect_count",
+        "cross_domain_redirect",
+        "final_host_matches_original",
+        "has_password_field",
+        "form_count",
+        "cross_domain_form",
+        "iframe_count",
+        "external_script_count",
+        "num_hidden_inputs",
+        "text_length",
+        "title_length",
+        "title_login_keyword",
+        "brand_mismatch",
+        "final_uses_http",
+        "cert_self_signed",
+        "cert_host_mismatch",
+        "cert_days_to_expiry",
+        "browser_ok"
+      ],
+      "metrics": {
+        "accuracy": 0.5714,
+        "precision": 1.0,
+        "recall": 0.5714,
+        "f1": 0.7273,
+        "confusion_matrix": [
+          [
+            0,
+            0
+          ],
+          [
+            3,
+            4
+          ]
+        ],
+        "roc_auc": null
+      }
+    },
+    "combined": {
+      "model_name": "logistic_regression",
+      "artifact": "combined__logistic_regression.joblib",
+      "feature_columns": [
+        "url_length",
+        "host_length",
+        "path_length",
+        "query_length",
+        "count_dots",
+        "count_hyphens",
+        "count_underscores",
+        "count_at",
+        "count_question",
+        "count_equals",
+        "count_ampersand",
+        "count_percent",
+        "count_slash",
+        "count_digits",
+        "digit_ratio",
+        "has_ip_host",
+        "has_https",
+        "has_double_slash_redirect",
+        "num_subdomains",
+        "tld_length",
+        "is_shortened",
+        "suspicious_keyword_count",
+        "has_suspicious_tld",
+        "host_entropy",
+        "has_userinfo",
+        "has_port",
+        "is_punycode",
+        "redirect_count",
+        "cross_domain_redirect",
+        "final_host_matches_original",
+        "has_password_field",
+        "form_count",
+        "cross_domain_form",
+        "iframe_count",
+        "external_script_count",
+        "num_hidden_inputs",
+        "text_length",
+        "title_length",
+        "title_login_keyword",
+        "brand_mismatch",
+        "final_uses_http",
+        "cert_self_signed",
+        "cert_host_mismatch",
+        "cert_days_to_expiry",
+        "browser_ok"
+      ],
+      "metrics": {
+        "accuracy": 0.8571,
+        "precision": 1.0,
+        "recall": 0.8571,
+        "f1": 0.9231,
+        "confusion_matrix": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            6
+          ]
+        ],
+        "roc_auc": null
+      }
+    }
+  },
+  "experiment": "phishing-link-detection",
+  "best": {
+    "run": "url_only__logistic_regression",
+    "metric": "f1",
+    "value": 1.0
+  }
+}
