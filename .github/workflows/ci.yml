@@ -116,6 +116,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+
   # 6) Publish images to ECR (main branch only; requires OIDC role configured)
   publish:
     runs-on: ubuntu-latest
@@ -124,22 +125,40 @@ jobs:
     permissions:
       id-token: write
       contents: read
+
+    # Map secrets to environment variables so step-level if conditions can use them.
+    env:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
     steps:
       - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+
+      - name: Configure AWS credentials
+        if: ${{ env.AWS_ROLE_ARN != '' && env.AWS_REGION != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Build and push to ECR
-        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+        if: ${{ env.AWS_ROLE_ARN != '' && env.AWS_REGION != '' }}
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
-          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
-          docker build -f Dockerfile.api -t "$REGISTRY/phishing-api:${{ github.sha }}" -t "$REGISTRY/phishing-api:latest" .
-          docker build -f Dockerfile.sandbox -t "$REGISTRY/phishing-sandbox:${{ github.sha }}" -t "$REGISTRY/phishing-sandbox:latest" .
-          docker push "$REGISTRY/phishing-api:${{ github.sha }}"
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          aws ecr get-login-password | docker login \
+            --username AWS --password-stdin "$REGISTRY"
+
+          docker build -f Dockerfile.api \
+            -t "$REGISTRY/phishing-api:${GITHUB_SHA}" \
+            -t "$REGISTRY/phishing-api:latest" .
+
+          docker build -f Dockerfile.sandbox \
+            -t "$REGISTRY/phishing-sandbox:${GITHUB_SHA}" \
+            -t "$REGISTRY/phishing-sandbox:latest" .
+
+          docker push "$REGISTRY/phishing-api:${GITHUB_SHA}"
           docker push "$REGISTRY/phishing-api:latest"
-          docker push "$REGISTRY/phishing-sandbox:${{ github.sha }}"
+          docker push "$REGISTRY/phishing-sandbox:${GITHUB_SHA}"
           docker push "$REGISTRY/phishing-sandbox:latest"
