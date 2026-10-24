@@ -10,7 +10,7 @@ Examples::
     python -m src.training.real_world
     python -m src.training.real_world --urls data/raw/real_world/real_world_urls.csv --no-browse
     python -m src.training.real_world --injection-only
-    python -m src.training.real_world --allow-network --openphish-url https://... 
+    python -m src.training.real_world --allow-network --openphish-url https://...
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.agent.reasoning import RuleBasedReasoner  # noqa: E402
 from src.config import PROJECT_ROOT as ROOT  # noqa: E402
 from src.ml.model_registry import ModelRegistry  # noqa: E402
-from src.training.common import binary_metrics, load_processed  # noqa: E402
+from src.training.common import binary_metrics  # noqa: E402
 
 RAW_REAL_WORLD = ROOT / "data" / "raw" / "real_world"
 INJECTION_DIR = RAW_REAL_WORLD / "prompt_injection"
@@ -115,7 +115,7 @@ def _injection_suite(injection_dir: Path) -> dict:
     results: list[dict] = []
     for path in sorted(injection_dir.glob("*.html")):
         html = path.read_text(encoding="utf-8", errors="ignore")
-        evidence = _evidence_from_html(html, f"https://paypal-secure-login.com/signin")
+        evidence = _evidence_from_html(html, "https://paypal-secure-login.com/signin")
         verdict = reasoner.reason(
             url_score=0.9,
             combined_score=None,
