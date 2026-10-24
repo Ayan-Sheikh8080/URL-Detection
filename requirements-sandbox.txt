@@ -1,3 +1,8 @@
-# Sandbox container only (headless browser visits)
--r requirements.txt
-playwright>=1.42
+# Sandbox container only (headless browser visits).
+# Keep this minimal: the sandbox holds no credentials and must have the
+# smallest possible attack surface. Do not add ML/training dependencies here.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+# Must match the browser build in the mcr.microsoft.com/playwright/python base image.
+playwright==1.44.0

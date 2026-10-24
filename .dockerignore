@@ -18,3 +18,6 @@ notebooks
 tests
 # Models are copied explicitly in Dockerfiles when needed. Avoid blanket
 # exclusion that prevents trained artifacts from reaching the image.
+!requirements.txt
+!requirements-sandbox.txt
+!requirements-dev.txt
