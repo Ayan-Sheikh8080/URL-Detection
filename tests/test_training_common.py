@@ -182,8 +182,8 @@ def test_prepare_writes_split_files(tmp_path):
 
 
 def test_prepare_dedupes_before_splitting(tmp_path):
-    from src.data.prepare import prepare
     import src.data.prepare as prepare_module
+    from src.data.prepare import prepare
 
     raw = tmp_path / "raw.csv"
     rows = [{"url": "https://dup.com/x", "label": 0}] * 10 + [
