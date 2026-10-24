@@ -38,3 +38,9 @@ data/raw/phiusiil.csv
 data/processed/
 mlflow.db
 mlruns/
+data/raw/phishing_urls.txt
+data/raw/phish_urls_sample.txt
+data/raw/tranco.csv
+data/raw/legit_urls.txt
+data/raw/crawled_real.jsonl
+data/raw/crawl_failed.jsonl

@@ -7,6 +7,8 @@ Safety controls implemented here:
   * observe-only: no clicking, no form submission, no downloads;
   * non-http(s) schemes (file:, data:, javascript:) are blocked;
   * private / loopback / link-local / metadata hosts are blocked;
+  * single-label hosts (Docker service names) and hosts whose DNS answer points
+    at a private address are blocked, including decimal/hex IP tricks;
   * hard wall-clock timeout per visit;
   * page content is captured as data only - it is never interpreted as
     instructions by this module.
@@ -15,6 +17,7 @@ Safety controls implemented here:
 from __future__ import annotations
 
 import ipaddress
+import socket
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -103,6 +106,46 @@ def is_visitable_url(url: str, *, block_private: bool = True) -> tuple[bool, str
     return True, ""
 
 
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:10.0.0.1 style addresses
+    if mapped is not None:
+        ip = mapped
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def host_is_unsafe(host: str) -> str:
+    """Return a reason if the host must not be visited, or '' if it is allowed.
+
+    Stricter than is_private_host: it also blocks single-label names (Docker
+    service names such as 'api'), numeric tricks such as decimal IPs, and any
+    domain whose DNS answer points at a private or internal address.
+    """
+    host = (host or "").strip().strip("[]").lower().rstrip(".")
+    if not host:
+        return "missing hostname"
+    if "." not in host and ":" not in host:
+        return f"single-label host blocked: {host}"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return ""  # unresolvable: the browser will fail on its own
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        except ValueError:
+            continue
+        if _blocked_ip(ip):
+            return f"{host} resolves to a private address"
+    return ""
+
+
 def visit_url(
     url: str,
     *,
@@ -123,6 +166,11 @@ def visit_url(
     if not allowed:
         evidence.error = f"blocked by sandbox policy: {reason}"
         return evidence
+    if block_private:
+        unsafe = host_is_unsafe(urlparse(url).hostname or "")
+        if unsafe:
+            evidence.error = f"blocked by sandbox policy: {unsafe}"
+            return evidence
 
     deadline = time.monotonic() + max(timeout_seconds, 1.0)
     started = time.monotonic()
@@ -142,10 +190,20 @@ def visit_url(
                     ignore_https_errors=False,
                 )
 
+                unsafe_cache: dict[str, str] = {}
+
+                def _unsafe(host: str) -> str:
+                    if host not in unsafe_cache:
+                        unsafe_cache[host] = host_is_unsafe(host)
+                    return unsafe_cache[host]
+
                 def _route(route) -> None:
                     """Abort anything outside the allow-list (defence in depth)."""
                     request_url = route.request.url
                     ok, why = is_visitable_url(request_url, block_private=block_private)
+                    if ok and block_private:
+                        why = _unsafe(urlparse(request_url).hostname or "")
+                        ok = not why
                     if not ok and not why.startswith("unparseable"):
                         route.abort()
                     else:

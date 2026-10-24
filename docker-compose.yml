@@ -1,6 +1,7 @@
 # Local end-to-end stack: API + browser sandbox.
-# The sandbox sits on an internal-only network so the API can reach it but it
-# cannot reach other services.
+# The sandbox has no mounted folders, no credentials, dropped capabilities and
+# resource limits. Page requests to private/internal hosts are blocked in code
+# (src/agent/browser_sandbox.py).
 services:
   api:
     build:
@@ -10,7 +11,7 @@ services:
       - "8000:8000"
     environment:
       SANDBOX_URL: http://sandbox:8080
-      SANDBOX_TIMEOUT_SECONDS: "20"
+      SANDBOX_TIMEOUT_SECONDS: "30"
       LLM_PROVIDER: ${LLM_PROVIDER:-rule_based}
       BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-anthropic.claude-3-haiku-20240307-v1:0}
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -31,12 +32,12 @@ services:
       context: .
       dockerfile: Dockerfile.sandbox
     environment:
-      SANDBOX_TIMEOUT_SECONDS: "20"
+      SANDBOX_TIMEOUT_SECONDS: "30"
       BLOCK_PRIVATE_NETWORKS: "true"
       BROWSER_HEADLESS: "true"
     # Bound resource limits: a hostile page must not exhaust the host.
-    mem_limit: 1g
-    cpus: 1.0
+    mem_limit: 2g
+    cpus: 2.0
     pids_limit: 512
     security_opt:
       - no-new-privileges:true
@@ -47,6 +48,8 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
 
 volumes:
   events:
@@ -54,4 +57,4 @@ volumes:
 networks:
   backend:
     driver: bridge
-    internal: false   # needs egress to the public web, but no inbound exposure
+    internal: false   # needs egress to the public web
