@@ -6,7 +6,13 @@ Supports:
   * the bundled synthetic sample (``data/raw/sample_urls.csv``);
   * the PhiUSIIL Phishing URL dataset: point ``data.raw_path`` at the downloaded
     CSV and set ``data.label_positive_is: legitimate`` (PhiUSIIL labels 1 as
-    legitimate).
+    legitimate);
+  * a crawled page-evidence set (``data/raw/crawled_evidence.jsonl``) used by the
+    content-only and combined configurations.
+
+The stage writes reproducible train/test splits for both the URL dataset and the
+crawled evidence set.  Crawled URLs are removed from the URL-only training data
+so that the shared benchmark used by ``evaluate`` never leaks into the URL model.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ from src.data.validate import (
 )
 
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+CRAWLED_TRAIN = "crawled_train.jsonl"
+CRAWLED_TEST = "crawled_test.jsonl"
 
 
 def load_raw_dataset(path: Path | str, positive_is: str = "phishing") -> pd.DataFrame:
@@ -85,6 +93,49 @@ def prepare(
     df = df.dropna(subset=["url", "label"])
     df = df.drop_duplicates(subset=["url"]).reset_index(drop=True)
 
+    # Crawled evidence ------------------------------------------------------
+    crawled_summary: dict = {"present": False}
+    crawled_train: list[dict] = []
+    crawled_test: list[dict] = []
+    crawled_urls: set[str] = set()
+    if crawled_path.exists():
+        records = _read_jsonl(crawled_path)
+        ev_report = validate_evidence_records(records)
+        assert_valid(ev_report)
+
+        deduped: dict[str, dict] = {}
+        for record in records:
+            deduped.setdefault(record["url"], record)
+        records = list(deduped.values())
+        crawled_urls = {record["url"] for record in records}
+
+        crawled_train, crawled_test = _split_records(
+            records, test_size=test_size, random_state=random_state
+        )
+        crawled_summary = {
+            "present": True,
+            "path": str(crawled_path.relative_to(PROJECT_ROOT))
+            if crawled_path.is_relative_to(PROJECT_ROOT)
+            else str(crawled_path),
+            "rows": len(records),
+            "train_rows": len(crawled_train),
+            "test_rows": len(crawled_test),
+            "warnings": ev_report.warnings,
+        }
+
+    # Keep the shared crawled benchmark out of URL training entirely.  This is
+    # what makes the agent-vs-URL-only comparison in evaluate.py honest.
+    if crawled_urls:
+        overlap = int(df["url"].isin(crawled_urls).sum())
+        if overlap:
+            df = df[~df["url"].isin(crawled_urls)].reset_index(drop=True)
+            crawled_summary["url_overlap_removed"] = overlap
+        if df.empty or df["label"].nunique() < 2:
+            raise ValueError(
+                "after removing URLs that are part of crawled evidence, the URL "
+                "dataset no longer has two classes; provide a larger URL dataset"
+            )
+
     # Stratify only when both classes have enough members for the split,
     # otherwise fall back to a plain random split.
     label_counts = df["label"].value_counts()
@@ -102,22 +153,14 @@ def prepare(
     train_df.to_csv(train_path, index=False)
     test_df.to_csv(test_path, index=False)
 
-    crawled_summary: dict = {"present": False}
-    if crawled_path.exists():
-        records = _read_jsonl(crawled_path)
-        ev_report = validate_evidence_records(records)
-        assert_valid(ev_report)
-        crawled_summary = {
-            "present": True,
-            "path": str(crawled_path.relative_to(PROJECT_ROOT)),
-            "rows": len(records),
-            "warnings": ev_report.warnings,
-        }
+    _write_jsonl(PROCESSED_DIR / CRAWLED_TRAIN, crawled_train)
+    _write_jsonl(PROCESSED_DIR / CRAWLED_TEST, crawled_test)
 
     meta = {
         "raw_path": str(raw_path),
         "raw_rows": before,
-        "rows_after_dedupe": len(df),
+        "rows_after_dedupe": len(df) + len(crawled_urls),
+        "url_rows_after_overlap_removal": len(df),
         "train_rows": len(train_df),
         "test_rows": len(test_df),
         "phishing_share": round(float(df["label"].mean()), 4),
@@ -130,6 +173,28 @@ def prepare(
     return meta
 
 
+def _split_records(records: list[dict], *, test_size: float, random_state: int) -> tuple[list[dict], list[dict]]:
+    """Split crawled evidence into stratified train/test lists."""
+    if len(records) < 2:
+        return records, []
+    labels = pd.Series([int(record["label"]) for record in records])
+    counts = labels.value_counts()
+    can_stratify = (
+        labels.nunique() == 2
+        and int(counts.min()) >= 2
+        and test_size * len(records) >= 2
+        and int(round(test_size * len(records))) >= 2
+    )
+    indices = list(range(len(records)))
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=labels if can_stratify else None,
+    )
+    return [records[i] for i in train_idx], [records[i] for i in test_idx]
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     records = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -137,6 +202,12 @@ def _read_jsonl(path: Path) -> list[dict]:
         if line:
             records.append(json.loads(line))
     return records
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
 
 
 def _sha256(path: Path) -> str:
@@ -147,8 +218,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_crawled_evidence(path: Path | None = None) -> list[dict]:
-    """Load crawled evidence records (url, label, evidence) if present."""
+def load_crawled_evidence(
+    path: Path | None = None, *, split: str | None = None
+) -> list[dict]:
+    """Load crawled evidence records.
+
+    ``split`` may be ``"train"`` or ``"test"`` to read the prepared split.  With
+    no split, the raw file is returned for backward compatibility.
+    """
+    if split is not None:
+        if split not in {"train", "test"}:
+            raise ValueError("split must be 'train' or 'test'")
+        processed = PROCESSED_DIR / (CRAWLED_TRAIN if split == "train" else CRAWLED_TEST)
+        if not processed.exists():
+            return []
+        return _read_jsonl(processed)
+
     params = load_params().get("data", {})
     path = path or PROJECT_ROOT / params.get("crawled_path", "data/raw/crawled_evidence.jsonl")
     if not path.exists():

@@ -132,23 +132,39 @@ def validate_evidence_records(records: list[dict], *, required=("url", "label", 
     missing = 0
     bad_labels = 0
     bad_urls = 0
+    bad_evidence = 0
+    duplicated = 0
+    seen: set[str] = set()
     for row in records:
-        if any(key not in row for key in required):
+        if not isinstance(row, dict) or any(key not in row for key in required):
             missing += 1
             continue
         if row["label"] not in (0, 1):
             bad_labels += 1
         if not _is_valid_url(row["url"]):
             bad_urls += 1
+        if not isinstance(row.get("evidence"), dict):
+            bad_evidence += 1
+        if row["url"] in seen:
+            duplicated += 1
+        seen.add(row["url"])
 
     if missing:
         report.errors.append(f"{missing} evidence records are missing required keys {required}")
+    if bad_evidence:
+        report.errors.append(f"{bad_evidence} evidence records have non-object evidence")
     if bad_labels:
         report.errors.append(f"{bad_labels} evidence records have labels outside {{0, 1}}")
     if bad_urls:
         report.errors.append(f"{bad_urls} evidence records have invalid URLs")
+    if duplicated:
+        report.warnings.append(f"{duplicated} duplicate evidence URLs found (will be dropped)")
 
-    with_errors = sum(1 for r in records if (r.get("evidence") or {}).get("error"))
+    with_errors = sum(
+        1
+        for r in records
+        if isinstance(r.get("evidence"), dict) and r["evidence"].get("error")
+    )
     if with_errors:
         report.warnings.append(f"{with_errors} evidence records contain browser errors")
     report.stats["browser_error_share"] = round(with_errors / max(len(records), 1), 4)

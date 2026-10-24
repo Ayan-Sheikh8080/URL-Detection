@@ -1,0 +1,55 @@
+{
+  "family": "phishing-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/phishing-api-task-role",
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/phishing-api:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "SANDBOX_URL", "value": "http://sandbox.local:8080"},
+        {"name": "MODEL_DIR", "value": "/app/models"},
+        {"name": "EVENTS_PATH", "value": "/app/data/monitoring/events.jsonl"},
+        {"name": "REPORTS_DIR", "value": "/app/reports"},
+        {"name": "MONITORING_ENABLED", "value": "true"},
+        {"name": "LLM_PROVIDER", "value": "rule_based"},
+        {"name": "AWS_REGION", "value": "REGION"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/phishing-api",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS http://localhost:8000/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "readonlyRootFilesystem": true,
+      "mountPoints": [
+        {"sourceVolume": "events", "containerPath": "/app/data/monitoring", "readOnly": false},
+        {"sourceVolume": "reports", "containerPath": "/app/reports", "readOnly": false}
+      ]
+    }
+  ],
+  "volumes": [
+    {"name": "events"},
+    {"name": "reports"}
+  ]
+}

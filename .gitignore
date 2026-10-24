@@ -26,21 +26,18 @@ data/processed/*
 !data/processed/.gitkeep
 data/monitoring/
 data/screenshots/
-*.dvc.lock
+# DVC lock files are tracked (pipeline reproducibility)
+# *.dvc.lock
 
 # IDE / OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
 .coverage
-data/raw/phiusiil.csv
-data/processed/
-mlflow.db
-mlruns/
-data/raw/phishing_urls.txt
-data/raw/phish_urls_sample.txt
-data/raw/tranco.csv
-data/raw/legit_urls.txt
-data/raw/crawled_real.jsonl
-data/raw/crawl_failed.jsonl
+.venv/
+__pycache__/
+.env
+.env.*
+!.env.example

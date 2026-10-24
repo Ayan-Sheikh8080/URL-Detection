@@ -7,14 +7,17 @@ Configurations (proposal feature 6):
   * content_only  - page evidence features (needs crawled evidence)
   * combined      - URL + page evidence (the agent configuration)
 
-Every run is logged to MLflow. The best model per configuration, the overall
-best model, a model index and a reference feature sample for drift monitoring
-are promoted into ``models/``.
+Every run is logged to MLflow.  Model selection uses stratified cross-validation
+on the training split only; the held-out test split is reserved for
+``evaluate.py``.  The best model per configuration, an overall best model, a
+model index and a reference feature sample for drift monitoring are promoted into
+``models/``.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 
 import joblib
 import mlflow
@@ -23,9 +26,9 @@ import pandas as pd
 from src.config import PROJECT_ROOT, load_params
 from src.training.common import (
     FEATURE_COLUMNS_BY_CONFIG,
-    binary_metrics,
     build_matrix,
     config_available,
+    cross_validate,
     load_crawled,
     load_processed,
     make_models,
@@ -42,9 +45,8 @@ def main() -> dict:
     training_params = params.get("training", {})
     metric_name = training_params.get("metric", "f1")
 
-    train_df, test_df = load_processed()
-    crawled = load_crawled()
-    crawled_df = pd.DataFrame(crawled) if crawled else None
+    train_df, _ = load_processed()
+    crawled_train = load_crawled(split="train")
 
     models = make_models(training_params)
     if not models:
@@ -55,12 +57,13 @@ def main() -> dict:
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    _clean_previous_artifacts()
 
     results: dict[str, dict] = {}
     index: dict[str, dict] = {"models": {}, "experiment": EXPERIMENT_NAME}
 
     for config in ("url_only", "content_only", "combined"):
-        if not config_available(config, crawled):
+        if not config_available(config, crawled_train):
             print(f"[train] skipping config '{config}' - no crawled page evidence available")
             continue
 
@@ -69,26 +72,26 @@ def main() -> dict:
         if config == "url_only":
             X_train = summarize_matrix(build_matrix(train_df["url"], None, config), columns)
             y_train = train_df["label"].astype(int)
-            X_test = summarize_matrix(build_matrix(test_df["url"], None, config), columns)
-            y_test = test_df["label"].astype(int)
         else:
-            full_evidence = [row["evidence"] for row in crawled]
-            crawled_urls = crawled_df["url"]
-            crawled_labels = crawled_df["label"].astype(int)
-            X_all = summarize_matrix(build_matrix(crawled_urls, full_evidence, config), columns)
-            split = max(int(len(X_all) * 0.7), 1)
-            if split >= len(X_all):
-                split = max(len(X_all) - 1, 1)
-            X_train, y_train = X_all.iloc[:split], crawled_labels.iloc[:split]
-            X_test, y_test = X_all.iloc[split:], crawled_labels.iloc[split:]
+            X_train = summarize_matrix(
+                build_matrix(
+                    pd.Series([row["url"] for row in crawled_train]),
+                    [row["evidence"] for row in crawled_train],
+                    config,
+                ),
+                columns,
+            )
+            y_train = pd.Series([row["label"] for row in crawled_train]).astype(int)
+
+        if y_train.nunique() < 2 or int(y_train.value_counts().min()) < 2:
+            print(f"[train] skipping config '{config}' - not enough rows per class")
+            continue
 
         for model_name, pipeline in models.items():
             run_name = f"{config}__{model_name}"
             with mlflow.start_run(run_name=run_name):
+                validation = cross_validate(pipeline, X_train, y_train)
                 pipeline.fit(X_train, y_train)
-                predictions = pipeline.predict(X_test)
-                probabilities = _positive_proba(pipeline, X_test)
-                metrics = binary_metrics(y_test, predictions, probabilities)
 
                 mlflow.log_params(
                     {
@@ -96,16 +99,29 @@ def main() -> dict:
                         "model_family": model_name,
                         "n_features": len(columns),
                         "n_train": len(X_train),
-                        "n_test": len(X_test),
-                        **{f"param__{k}": v for k, v in _nested(training_params).items()},
+                        **_flatten_params(training_params),
                     }
                 )
-                mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
-                mlflow.log_dict({"features": columns, "metrics": metrics}, "schema.json")
+                mlflow.log_metrics(
+                    {f"cv_{k}": v for k, v in validation.items() if isinstance(v, (int, float))}
+                )
+                mlflow.log_dict(
+                    {"features": columns, "metrics": validation}, "schema.json"
+                )
 
-                print(f"[train] {run_name}: {metric_name}={metrics[metric_name]}")
+                print(
+                    f"[train] {run_name}: cv_{metric_name}="
+                    f"{validation.get(metric_name)} (n={len(X_train)})"
+                )
 
-                results[run_name] = {"config": config, "model_name": model_name, **metrics}
+                result = {
+                    "config": config,
+                    "model_name": model_name,
+                    "n_train": len(X_train),
+                    "n_features": len(columns),
+                    **validation,
+                }
+                results[run_name] = result
 
                 artifact = f"{config}__{model_name}.joblib"
                 joblib.dump(pipeline, MODELS_DIR / artifact)
@@ -115,7 +131,7 @@ def main() -> dict:
                     "model_name": model_name,
                     "artifact": artifact,
                     "feature_columns": columns,
-                    "metrics": metrics,
+                    "metrics": validation,
                 }
                 _promote(index, config, entry, metric_name)
 
@@ -131,18 +147,25 @@ def main() -> dict:
         sample = X_ref.sample(n=min(len(X_ref), 500), random_state=42)
         sample.to_csv(MODELS_DIR / "reference_features.csv", index=False)
 
-    best_run = max(results.items(), key=lambda kv: kv[1][metric_name])
-    index["best"] = {"run": best_run[0], "metric": metric_name, "value": best_run[1][metric_name]}
-    (MODELS_DIR / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    best_run = max(results.items(), key=lambda kv: kv[1][metric_name] or 0)
+    index["best"] = {
+        "run": best_run[0],
+        "metric": metric_name,
+        "value": best_run[1][metric_name],
+    }
+    (MODELS_DIR / "index.json").write_text(json.dumps(index, indent=2, allow_nan=False), encoding="utf-8")
 
     report = {
         "experiment": EXPERIMENT_NAME,
         "metric": metric_name,
+        "selection": "stratified cross-validation on the training split",
         "best": index["best"],
         "results": results,
         "promoted": {cfg: meta["model_name"] for cfg, meta in index["models"].items()},
     }
-    (REPORTS_DIR / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (REPORTS_DIR / "metrics.json").write_text(
+        json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
+    )
     print(f"[train] best run: {best_run[0]} ({metric_name}={best_run[1][metric_name]})")
     return report
 
@@ -150,32 +173,36 @@ def main() -> dict:
 def _promote(index: dict, config: str, entry: dict, metric_name: str) -> None:
     """Keep the best model per configuration."""
     current = index["models"].get(config)
-    if current is None or entry["metrics"][metric_name] > current["metrics"][metric_name]:
+    if current is None or (entry["metrics"].get(metric_name) or 0) > (
+        current["metrics"].get(metric_name) or 0
+    ):
         index["models"][config] = entry
-        # Promoted names consumed by the model registry.
-        joblib.dump(
-            joblib.load(MODELS_DIR / entry["artifact"]),
-            MODELS_DIR / f"{config}_model.pkl",
-        )
-    if "best" not in index or entry["metrics"][metric_name] > index["best"].get("value", -1):
-        index["best"] = {"run": f"{config}__{entry['model_name']}", "metric": metric_name,
-                         "value": entry["metrics"][metric_name]}
+        # Promoted name consumed by the model registry.
+        shutil.copyfile(MODELS_DIR / entry["artifact"], MODELS_DIR / f"{config}_model.pkl")
 
 
-def _positive_proba(pipeline, X) -> list[float] | None:
-    if not hasattr(pipeline, "predict_proba"):
-        return None
-    return pipeline.predict_proba(X)[:, 1].tolist()
+def _clean_previous_artifacts() -> None:
+    for pattern in ("*_model.pkl", "*__*.joblib"):
+        for path in MODELS_DIR.glob(pattern):
+            path.unlink()
+    for name in ("index.json", "reference_features.csv"):
+        path = MODELS_DIR / name
+        if path.exists():
+            path.unlink()
 
 
-def _nested(params: dict) -> dict:
-    """Flatten nested training params for MLflow logging."""
+def _flatten_params(params: dict) -> dict:
+    """Flatten nested training params for MLflow (models and families included)."""
     flat: dict = {}
-    for key, value in (params or {}).items():
-        if key == "models" or not isinstance(value, dict):
-            continue
-        for inner_key, inner_value in value.items():
-            flat[f"{key}.{inner_key}"] = inner_value
+
+    def walk(prefix: str, value) -> None:
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                walk(f"{prefix}.{key}" if prefix else str(key), inner)
+        else:
+            flat[f"param__{prefix}"] = value
+
+    walk("", params or {})
     return flat
 
 

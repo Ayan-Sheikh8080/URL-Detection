@@ -36,6 +36,11 @@ def make_models(training_params: dict) -> dict[str, Pipeline]:
     rf_params = dict(params.get("random_forest", {}))
     xgb_params = dict(params.get("xgboost", {}))
 
+    # Small datasets benefit from balanced class weights.  An explicit value in
+    # params.yaml always wins.
+    lr_params.setdefault("class_weight", "balanced")
+    rf_params.setdefault("class_weight", "balanced_subsample")
+
     models: dict[str, Pipeline] = {
         "logistic_regression": Pipeline(
             [
@@ -54,10 +59,11 @@ def make_models(training_params: dict) -> dict[str, Pipeline]:
     try:
         from xgboost import XGBClassifier
 
+        xgb_params.setdefault("eval_metric", "logloss")
         models["xgboost"] = Pipeline(
             [
                 ("scaler", StandardScaler()),
-                ("clf", XGBClassifier(eval_metric="logloss", **xgb_params)),
+                ("clf", XGBClassifier(**xgb_params)),
             ]
         )
     except ImportError:  # optional dependency
@@ -110,8 +116,9 @@ def build_matrix(urls: pd.Series, evidence_records: list[dict] | None, config: s
     raise ValueError(f"unknown config: {config}")
 
 
-def load_crawled() -> list[dict]:
-    return load_crawled_evidence()
+def load_crawled(split: str | None = None) -> list[dict]:
+    """Load crawled evidence from the prepared train/test split (or raw)."""
+    return load_crawled_evidence(split=split)
 
 
 def config_available(config: str, crawled: list[dict]) -> bool:
@@ -129,11 +136,67 @@ def summarize_matrix(matrix: pd.DataFrame, expected: list[str]) -> pd.DataFrame:
     return matrix.astype(float)
 
 
+def cross_validate(
+    pipeline: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    folds: int = 5,
+) -> dict:
+    """Stratified cross-validation metrics used for model selection.
+
+    The final test split is never touched here; ``evaluate.py`` owns it.  This
+    keeps model promotion and the reported agent-vs-URL-only comparison honest.
+    """
+    from sklearn.base import clone
+    from sklearn.model_selection import StratifiedKFold
+
+    y = pd.Series(y).astype(int).reset_index(drop=True)
+    X = X.reset_index(drop=True)
+    counts = y.value_counts()
+    if y.nunique() < 2 or int(counts.min()) < 2:
+        raise ValueError("cross-validation requires at least two rows of each class")
+
+    n_splits = max(2, min(folds, int(counts.min())))
+    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    fold_metrics: list[dict] = []
+    confusion = np.zeros((2, 2), dtype=int)
+
+    for train_idx, valid_idx in splitter.split(X, y):
+        model = clone(pipeline)
+        model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        predictions = model.predict(X.iloc[valid_idx])
+        probabilities = _positive_proba(model, X.iloc[valid_idx])
+        metrics = binary_metrics(y.iloc[valid_idx], predictions, probabilities)
+        fold_metrics.append(metrics)
+        confusion += np.asarray(metrics["confusion_matrix"], dtype=int)
+
+    summary: dict = {}
+    for key in ("accuracy", "precision", "recall", "f1", "roc_auc"):
+        values = [m[key] for m in fold_metrics if isinstance(m.get(key), (int, float))]
+        if not values:
+            summary[key] = None
+            continue
+        mean = float(np.mean(values))
+        summary[key] = round(mean, 4)
+        summary[f"{key}_std"] = round(float(np.std(values)), 4)
+    summary["confusion_matrix"] = confusion.tolist()
+    summary["n_folds"] = n_splits
+    return summary
+
+
+def _positive_proba(model, X) -> list[float]:
+    if not hasattr(model, "predict_proba"):
+        return []
+    return model.predict_proba(X)[:, 1].tolist()
+
+
 __all__ = [
     "FEATURE_COLUMNS_BY_CONFIG",
     "binary_metrics",
     "build_matrix",
     "config_available",
+    "cross_validate",
     "load_crawled",
     "load_processed",
     "make_models",

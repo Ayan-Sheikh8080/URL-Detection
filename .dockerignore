@@ -16,3 +16,5 @@ reports/*.json
 *.pkl
 notebooks
 tests
+# Models are copied explicitly in Dockerfiles when needed. Avoid blanket
+# exclusion that prevents trained artifacts from reaching the image.

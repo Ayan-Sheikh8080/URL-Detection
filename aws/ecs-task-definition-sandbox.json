@@ -1,0 +1,57 @@
+{
+  "family": "phishing-sandbox",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/phishing-sandbox-task-role",
+  "containerDefinitions": [
+    {
+      "name": "sandbox",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/phishing-sandbox:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "SANDBOX_TIMEOUT_SECONDS", "value": "20"},
+        {"name": "BLOCK_PRIVATE_NETWORKS", "value": "true"},
+        {"name": "BROWSER_HEADLESS", "value": "true"},
+        {"name": "SCREENSHOT_DIR", "value": "/tmp/screenshots"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/phishing-sandbox",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=4).status == 200 else 1)\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      },
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {
+        "capabilities": {
+          "drop": ["ALL"]
+        }
+      },
+      "mountPoints": [],
+      "tmpfs": [
+        {
+          "containerPath": "/tmp",
+          "size": 256
+        }
+      ]
+    }
+  ],
+  "volumes": []
+}

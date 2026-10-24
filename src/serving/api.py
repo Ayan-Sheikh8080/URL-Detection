@@ -11,10 +11,9 @@ Endpoints
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from src.agent.agent import PhishingAgent
 from src.config import Settings
@@ -54,8 +53,10 @@ def create_app(agent: PhishingAgent | None = None, settings: Settings | None = N
         model_loaded = False
         reasoner = "unknown"
         if current is not None:
-            configs = current.registry.available_configs()
-            model_loaded = current.registry.load_best() is not None
+            registry = getattr(current, "registry", None)
+            if registry is not None:
+                configs = registry.available_configs()
+                model_loaded = registry.load_best() is not None
             reasoner = getattr(current.reasoner, "reasoner_name", type(current.reasoner).__name__)
         return HealthResponse(
             status="ok",
@@ -71,15 +72,19 @@ def create_app(agent: PhishingAgent | None = None, settings: Settings | None = N
         if current is None:
             raise HTTPException(status_code=503, detail="agent not initialized")
 
-        result = current.analyze(request.url, browse=request.browse)
+        try:
+            result = current.analyze(request.url, browse=request.browse)
+        except Exception:  # noqa: BLE001 - never leak internals to the client
+            raise HTTPException(status_code=500, detail="analysis failed") from None
 
-        if os.getenv("MONITORING_ENABLED", "true").lower() in {"1", "true", "yes"}:
+        if settings.monitoring_enabled:
             metrics.record(
                 url=result.url,
                 verdict=result.verdict,
                 confidence=result.confidence,
                 model_score=result.model_score,
                 browser_ok=bool(result.browser.get("ok")),
+                browser_error=result.browser.get("error"),
                 latency_ms=result.timings_ms.get("total_ms", 0.0),
                 features=extract_url_features(result.url),
                 reasons=result.reasons,
@@ -87,7 +92,9 @@ def create_app(agent: PhishingAgent | None = None, settings: Settings | None = N
         return AnalyzeResponse(**result.to_dict())
 
     @app.get("/monitoring/stats")
-    def monitoring_stats(window: int = 1000) -> dict:
+    def monitoring_stats(
+        window: int = Query(1000, ge=1, le=100_000, description="Number of recent analyses"),
+    ) -> dict:
         return metrics.summary(window=window)
 
     @app.get("/monitoring/drift")
@@ -96,6 +103,7 @@ def create_app(agent: PhishingAgent | None = None, settings: Settings | None = N
             reference_path=settings.model_dir / "reference_features.csv",
             events_path=settings.events_path,
             threshold=settings.psi_threshold,
+            reports_dir=settings.reports_dir,
         )
 
     return app

@@ -6,12 +6,15 @@ stages:
       - src/data/validate.py
       - src/features/url_features.py
       - data/raw/sample_urls.csv
+      - data/raw/crawled_evidence.jsonl
     params:
-      - params.yaml
+      - data
     outs:
       - data/processed/train.csv
       - data/processed/test.csv
       - data/processed/dataset_meta.json
+      - data/processed/crawled_train.jsonl
+      - data/processed/crawled_test.jsonl
 
   train:
     cmd: python -m src.training.train
@@ -22,15 +25,15 @@ stages:
       - src/features/page_features.py
       - src/features/featurize.py
       - data/processed/train.csv
-      - data/processed/test.csv
-      - data/raw/crawled_evidence.jsonl
+      - data/processed/crawled_train.jsonl
     params:
-      - params.yaml
+      - training
     outs:
-      - models/url_model.pkl
-      - models/best_model.pkl
       - models/index.json
       - models/reference_features.csv
+      - models/url_only_model.pkl
+      - models/content_only_model.pkl
+      - models/combined_model.pkl
     metrics:
       - reports/metrics.json
 
@@ -38,10 +41,15 @@ stages:
     cmd: python -m src.training.evaluate
     deps:
       - src/training/evaluate.py
+      - src/training/common.py
+      - src/features/url_features.py
+      - src/features/page_features.py
+      - src/features/featurize.py
       - data/processed/test.csv
-      - data/raw/crawled_evidence.jsonl
+      - data/processed/crawled_test.jsonl
       - models/index.json
     params:
-      - params.yaml
+      - training
+      - evaluation
     metrics:
       - reports/evaluation.json

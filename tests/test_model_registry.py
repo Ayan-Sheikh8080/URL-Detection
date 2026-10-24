@@ -6,7 +6,6 @@ import json
 
 import joblib
 import numpy as np
-import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -114,7 +113,8 @@ def test_top_factors_are_ranked_by_absolute_contribution(tmp_path):
     assert len(factors) == 3
     assert factors[0]["feature"] == "strong"
     assert factors[0]["direction"] in {"increases_risk", "decreases_risk"}
-    assert {"feature", "value", "contribution", "direction"} == set(factors[0])
+    assert {"feature", "value", "contribution", "direction", "method"} == set(factors[0])
+    assert factors[0]["method"] == "linear"
 
 
 def test_top_factors_support_tree_importances():
@@ -133,6 +133,7 @@ def test_top_factors_support_tree_importances():
 
         predict_proba = LoadedModel.predict_proba
         top_factors = LoadedModel.top_factors
+        _shap_contributions = LoadedModel._shap_contributions
 
     wrapper = TreeWrapper()
     factors = wrapper.top_factors({"a": 1.0, "b": 0.0, "c": 0.0}, k=2)
@@ -156,5 +157,7 @@ def test_reference_features_round_trip(tmp_path):
 def test_corrupt_index_does_not_crash(tmp_path):
     (tmp_path / "index.json").write_text("{not json", encoding="utf-8")
     registry = ModelRegistry(tmp_path)
-    with pytest.raises(json.JSONDecodeError):
-        registry.load("url_only")
+    # A corrupt manifest is treated as "no models available" so serving stays up.
+    assert registry.load("url_only") is None
+    assert registry.load_best() is None
+    assert registry.available_configs() == []

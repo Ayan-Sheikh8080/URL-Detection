@@ -56,32 +56,45 @@ class PhishingAgent:
 
     # ------------------------------------------------------------------ #
     def analyze(self, url: str, *, browse: bool = True) -> AnalysisResult:
+        analysis_started = time.perf_counter()
         timings: dict[str, float] = {}
 
-        # Tool 1: URL model
+        # Tool 1: URL model.  Only a model trained on URL features may score a
+        # URL-only feature vector; a content/combined model needs page evidence.
         t0 = time.monotonic()
         url_features = extract_url_features(url)
-        url_model = self.registry.load("url_only") or self.registry.load_best()
+        url_model = self.registry.load("url_only")
+        if url_model is None:
+            fallback = self.registry.load_best()
+            url_model = fallback if getattr(fallback, "config", None) == "url_only" else None
         url_score = url_model.predict_proba(url_features) if url_model else None
         top_factors = url_model.top_factors(url_features) if url_model else []
         timings["url_model_ms"] = _ms(t0)
 
         # Tool 2: sandboxed browser visit
         t0 = time.monotonic()
-        evidence = self.sandbox.visit(url) if browse else {
-            "requested_url": url,
-            "error": "browsing skipped (requested url-only analysis)",
-        }
+        evidence = (
+            self.sandbox.visit(url)
+            if browse
+            else {
+                "requested_url": url,
+                "error": "browsing skipped (requested url-only analysis)",
+            }
+        )
         timings["browser_ms"] = _ms(t0)
 
-        # Tool 3: certificate + domain/brand checks
+        # Tool 3: certificate + domain/brand checks.  The sandbox collects the
+        # certificate; the API is only a fallback for older sandbox versions.
         t0 = time.monotonic()
         final_url = evidence.get("final_url") or url
         host = _host(final_url)
         if evidence.get("error") is None:
-            evidence["cert"] = cert_details(host)
+            cert = evidence.get("cert")
+            if not isinstance(cert, dict) or not cert:
+                cert = cert_details(host)
+            evidence["cert"] = cert
         else:
-            evidence.setdefault("cert", {})
+            evidence["cert"] = evidence.get("cert") if isinstance(evidence.get("cert"), dict) else {}
         domain_info = domain_checks(url, final_url, evidence.get("title") or "")
         evidence["domain_checks"] = domain_info
         timings["checks_ms"] = _ms(t0)
@@ -89,12 +102,17 @@ class PhishingAgent:
         # Combined model (content + URL) when page evidence is available
         combined_score = None
         combined_model = self.registry.load("combined")
-        if combined_model is not None and combined_model is not url_model and evidence.get("error") is None:
+        evidence_ok = evidence.get("error") is None and bool(evidence.get("final_url"))
+        if combined_model is not None and evidence_ok:
             features = dict(url_features)
             features.update(extract_page_features(evidence))
-            combined_score = combined_model.predict_proba(features)
-            if not top_factors:
-                top_factors = combined_model.top_factors(features)
+            try:
+                combined_score = combined_model.predict_proba(features)
+                combined_factors = combined_model.top_factors(features)
+                if combined_factors:
+                    top_factors = combined_factors
+            except Exception:  # noqa: BLE001 - a bad model must not break analysis
+                combined_score = None
 
         # Tool 4: reasoning layer
         t0 = time.monotonic()
@@ -107,7 +125,7 @@ class PhishingAgent:
             suspicious_threshold=self.settings.suspicious_threshold,
         )
         timings["reasoning_ms"] = _ms(t0)
-        timings["total_ms"] = round(sum(timings.values()), 2)
+        timings["total_ms"] = round((time.perf_counter() - analysis_started) * 1000, 3)
 
         return AnalysisResult(
             url=url,
@@ -123,6 +141,8 @@ class PhishingAgent:
                 "ok": evidence.get("error") is None,
                 "error": evidence.get("error"),
                 "load_ms": evidence.get("load_ms", 0.0),
+                "status_code": evidence.get("status_code"),
+                "final_url": evidence.get("final_url") or "",
             },
             reasoner=verdict.reasoner,
             timings_ms=timings,
@@ -130,7 +150,7 @@ class PhishingAgent:
 
 
 def _ms(start: float) -> float:
-    return round((time.monotonic() - start) * 1000, 2)
+    return round((time.perf_counter() - start) * 1000, 2)
 
 
 def _host(url: str) -> str:

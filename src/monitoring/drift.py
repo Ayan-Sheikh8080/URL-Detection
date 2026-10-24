@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import PROJECT_ROOT, Settings
+from src.config import Settings
 from src.monitoring.metrics import MetricsStore
 
 
@@ -30,8 +30,8 @@ def population_stability_index(
     features), equal-width edges are used whenever the reference has fewer
     distinct edges than requested bins.
     """
-    ref = pd.Series(reference).dropna().astype(float)
-    cur = pd.Series(current).dropna().astype(float)
+    ref = pd.to_numeric(pd.Series(reference), errors="coerce").dropna().astype(float)
+    cur = pd.to_numeric(pd.Series(current), errors="coerce").dropna().astype(float)
     if len(ref) == 0 or len(cur) == 0:
         return 0.0
 
@@ -48,7 +48,9 @@ def population_stability_index(
     psi = 0.0
     epsilon = 1e-6
     for r, c in zip(_histogram(ref, edges), _histogram(cur, edges), strict=False):
-        psi += (max(c, epsilon) - max(r, epsilon)) * math.log(max(c, epsilon) / max(r, epsilon))
+        psi += (max(c, epsilon) - max(r, epsilon)) * math.log(
+            max(c, epsilon) / max(r, epsilon)
+        )
     return round(psi, 4)
 
 
@@ -58,18 +60,26 @@ def drift_report(
     events_path: str | Path | None = None,
     threshold: float | None = None,
     min_events: int = 30,
+    reports_dir: str | Path | None = None,
 ) -> dict:
     """Compare the live feature distribution against the training reference."""
-    settings = Settings()
-    reference_path = Path(reference_path or settings.model_dir / "reference_features.csv")
+    settings = Settings.from_env()
+    reference_path = Path(
+        reference_path or settings.model_dir / "reference_features.csv"
+    )
     threshold = settings.psi_threshold if threshold is None else threshold
 
     if not reference_path.exists():
         return {"available": False, "reason": f"reference features missing: {reference_path}"}
 
-    reference = pd.read_csv(reference_path)
-    events = MetricsStore(events_path).events()
-    feature_rows = [e["features"] for e in events if e.get("features")]
+    try:
+        reference = pd.read_csv(reference_path)
+    except Exception as exc:  # noqa: BLE001 - a corrupt reference is unavailable
+        return {"available": False, "reason": f"reference features unreadable: {exc}"}
+
+    events = MetricsStore(events_path or settings.events_path).events()
+    feature_rows = [e["features"] for e in events if isinstance(e.get("features"), dict)]
+    feature_rows = [row for row in feature_rows if row]
 
     if len(feature_rows) < min_events:
         return {
@@ -79,7 +89,13 @@ def drift_report(
         }
 
     current = pd.DataFrame(feature_rows)
-    shared = [c for c in reference.columns if c in current.columns]
+    shared = [
+        column
+        for column in reference.columns
+        if column in current.columns
+        and pd.api.types.is_numeric_dtype(reference[column])
+        and pd.api.types.is_numeric_dtype(current[column])
+    ]
 
     per_feature: dict[str, dict] = {}
     drifted: list[str] = []
@@ -106,14 +122,18 @@ def drift_report(
         "evidently": _evidently_report(reference[shared], current[shared]),
     }
 
-    reports_dir = PROJECT_ROOT / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    (reports_dir / "drift_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    target_dir = Path(reports_dir or settings.reports_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "drift_report.json").write_text(
+        json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
+    )
     return report
 
 
 def _evidently_report(reference: pd.DataFrame, current: pd.DataFrame) -> dict:
     """Optional Evidently AI summary; report availability without failing."""
+    if reference.empty or current.empty:
+        return {"available": False, "reason": "no shared numeric features"}
     try:
         from evidently import ColumnMapping  # noqa: F401
         from evidently.metric_preset import DataDriftPreset
@@ -125,7 +145,7 @@ def _evidently_report(reference: pd.DataFrame, current: pd.DataFrame) -> dict:
         drifted = result["metrics"][0]["result"].get("number_of_drifted_columns")
         return {"available": True, "drifted_columns": drifted}
     except Exception as exc:  # noqa: BLE001 - Evidently is optional
-        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"available": False, "reason": f"{type(exc).__name__}"}
 
 
 def _equal_width_edges(reference: pd.Series, bins: int) -> list[float]:

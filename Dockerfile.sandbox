@@ -8,11 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-sandbox.txt ./
+COPY requirements-sandbox.txt ./
 RUN pip install --no-cache-dir -r requirements-sandbox.txt
 
 COPY src ./src
 COPY params.yaml ./
+COPY data/raw ./data/raw
 
 RUN useradd --create-home --uid 10002 sandbox \
     && mkdir -p /tmp/screenshots \

@@ -331,4 +331,3 @@ tracked experiments, a cloud-deployed API, automated tests and monitoring — in
 which a sandboxed browser agent investigates the link itself and explains its
 verdict. `reports/evaluation.json` quantifies how much the page evidence adds
 over URL-only detection.
-

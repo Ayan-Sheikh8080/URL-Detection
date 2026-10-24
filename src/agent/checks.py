@@ -16,8 +16,36 @@ from src.features.url_features import SUSPICIOUS_TLDS, registrable_domain
 KNOWN_BRANDS = [
     "paypal", "google", "facebook", "instagram", "microsoft", "apple",
     "amazon", "netflix", "whatsapp", "outlook", "chase", "bankofamerica",
-    "coinbase", "dropbox", "linkedin", "github", "steam",
+    "coinbase", "dropbox", "linkedin", "github", "steam", "dhl", "irs",
+    "ebay", "hdfc",
 ]
+
+# Official registrable domains for the brands above.  This avoids false
+# positives for legitimate subdomains (outlook.live.com) while still catching
+# lookalikes such as paypal.com.evil.top (registrable domain evil.top).
+BRAND_OFFICIAL_DOMAINS: dict[str, set[str]] = {
+    "paypal": {"paypal.com", "paypal.me"},
+    "google": {"google.com", "gmail.com", "youtube.com", "google.co.uk"},
+    "facebook": {"facebook.com", "fb.com"},
+    "instagram": {"instagram.com"},
+    "microsoft": {"microsoft.com", "live.com", "office.com", "microsoftonline.com"},
+    "apple": {"apple.com", "icloud.com"},
+    "amazon": {"amazon.com", "amazon.co.uk", "amazon.in"},
+    "netflix": {"netflix.com"},
+    "whatsapp": {"whatsapp.com", "wa.me"},
+    "outlook": {"live.com", "outlook.com", "microsoft.com"},
+    "chase": {"chase.com"},
+    "bankofamerica": {"bankofamerica.com"},
+    "coinbase": {"coinbase.com"},
+    "dropbox": {"dropbox.com"},
+    "linkedin": {"linkedin.com"},
+    "github": {"github.com"},
+    "steam": {"steampowered.com", "steamcommunity.com"},
+    "dhl": {"dhl.com"},
+    "irs": {"irs.gov"},
+    "ebay": {"ebay.com"},
+    "hdfc": {"hdfcbank.com"},
+}
 
 IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 
@@ -36,11 +64,9 @@ def cert_details(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
         "host_matches": None,
         "error": None,
     }
-    if not hostname or IPV4_RE.match(hostname) is None and "." not in hostname:
-        # Nothing sensible to check for empty or single-label hosts.
-        if not hostname or "." not in hostname:
-            result["error"] = "unqualified hostname"
-            return result
+    if not hostname or (IPV4_RE.match(hostname) is None and "." not in hostname):
+        result["error"] = "unqualified hostname"
+        return result
     try:
         context = ssl.create_default_context()
         with socket.create_connection((hostname, port), timeout=timeout) as sock:
@@ -63,7 +89,7 @@ def cert_details(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
     if not_after_raw:
         try:
             not_after = dt.datetime.strptime(not_after_raw, "%b %d %H:%M:%S %Y %Z")
-            days_to_expiry = (not_after - dt.datetime.utcnow()).days
+            days_to_expiry = (not_after - dt.datetime.now(dt.UTC).replace(tzinfo=None)).days
         except ValueError:
             days_to_expiry = None
 
@@ -71,7 +97,7 @@ def cert_details(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
         issuer=issuer_cn,
         subject_cn=subject_cn,
         days_to_expiry=days_to_expiry,
-        self_signed=bool(subject_cn and issuer_cn and subject_cn == issuer_cn),
+        self_signed=bool(_normalize(subject_cn) and _normalize(subject_cn) == _normalize(issuer_cn)),
         host_matches=_hostname_matches(hostname, san_names),
     )
     return result
@@ -85,19 +111,35 @@ def _first_cn(subject_entries) -> str | None:
     return None
 
 
+def _normalize(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
 def _hostname_matches(hostname: str, san_names: list[str]) -> bool:
     hostname = hostname.lower().rstrip(".")
     for name in san_names:
         name = name.lower().rstrip(".")
         if name.startswith("*."):
             # Wildcards only cover one label level (www.example.com, not a.b.c).
-            if fnmatch.fnmatchcase(hostname, name.replace("*.", "*.")):
+            if fnmatch.fnmatchcase(hostname, name):
                 suffix = name[1:]  # ".example.com"
                 if hostname.endswith(suffix) and "." not in hostname[: -len(suffix)]:
                     return True
         elif name == hostname:
             return True
     return False
+
+
+def _brand_in_domain(brand: str, host: str) -> bool:
+    """True when `host` belongs to the brand's official registrable domain."""
+    base = registrable_domain(host)
+    if not base:
+        return False
+    official = BRAND_OFFICIAL_DOMAINS.get(brand)
+    if official:
+        return base in official
+    labels = base.split(".")[:-1]
+    return any(label.replace("-", "") == brand for label in labels)
 
 
 def domain_checks(original_url: str, final_url: str, page_title: str = "") -> dict:
@@ -109,9 +151,9 @@ def domain_checks(original_url: str, final_url: str, page_title: str = "") -> di
     final_base = registrable_domain(final_host)
     same_base = bool(original_base) and original_base == final_base
 
-    title_lower = (page_title or "").lower()
+    title_lower = (page_title or "").lower().replace(" ", "")
     brand_shown = next((b for b in KNOWN_BRANDS if b in title_lower), None)
-    brand_mismatch = bool(brand_shown) and brand_shown not in final_host.replace("-", "")
+    brand_mismatch = bool(brand_shown) and not _brand_in_domain(brand_shown, final_host)
 
     homoglyph = "xn--" in final_host or any(ord(ch) > 127 for ch in final_host)
     final_tld = final_host.rsplit(".", 1)[-1] if "." in final_host else ""

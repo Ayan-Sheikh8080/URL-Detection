@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     url: str = Field(..., description="Link to analyze", max_length=2048)
     browse: bool = Field(
         default=True,
@@ -36,21 +38,24 @@ class VerdictFactors(BaseModel):
     value: float
     contribution: float
     direction: str
+    method: str | None = None
 
 
 class AnalyzeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     url: str
     verdict: str
     confidence: float
     reasons: list[str]
     model_score: float | None = None
     combined_score: float | None = None
-    top_factors: list[VerdictFactors] = []
-    evidence_summary: dict = {}
-    domain_checks: dict = {}
-    browser: dict = {}
+    top_factors: list[VerdictFactors] = Field(default_factory=list)
+    evidence_summary: dict = Field(default_factory=dict)
+    domain_checks: dict = Field(default_factory=dict)
+    browser: dict = Field(default_factory=dict)
     reasoner: str
-    timings_ms: dict = {}
+    timings_ms: dict = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):

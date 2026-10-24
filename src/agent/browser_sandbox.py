@@ -6,10 +6,13 @@ locked-down container that holds no credentials and has no cloud role.
 Safety controls implemented here:
   * observe-only: no clicking, no form submission, no downloads;
   * non-http(s) schemes (file:, data:, javascript:) are blocked;
-  * private / loopback / link-local / metadata hosts are blocked;
-  * single-label hosts (Docker service names) and hosts whose DNS answer points
-    at a private address are blocked, including decimal/hex IP tricks;
-  * hard wall-clock timeout per visit;
+  * private / loopback / link-local / metadata hosts are blocked, including
+    hosts that only *resolve* to a private address (DNS-rebinding guard);
+  * sub-resource requests are checked against the same policy (defence in depth);
+  * redirects are resolved with ``urljoin`` so a relative ``Location`` cannot be
+    mis-attributed;
+  * the TLS certificate is collected inside the sandbox, not by the API;
+  * hard wall-clock timeout per visit, enforced across every step;
   * page content is captured as data only - it is never interpreted as
     instructions by this module.
 """
@@ -19,10 +22,15 @@ from __future__ import annotations
 import ipaddress
 import socket
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
+from src.agent.checks import cert_details
 from src.agent.evidence import Evidence, FormEvidence
+from src.features.url_features import registrable_domain
 
 BLOCKED_SCHEMES = {"file", "data", "javascript", "ftp", "about", "blob"}
 
@@ -33,6 +41,8 @@ BLOCKED_HOSTNAMES = {
     "169.254.169.254",  # AWS/GCP instance metadata
     "100.100.100.200",  # Alibaba Cloud metadata
 }
+
+ALLOWED_SCHEMES = {"http", "https"}
 
 # JavaScript evaluated in the page context. Read-only DOM queries only.
 _COLLECT_SCRIPT = """
@@ -64,6 +74,15 @@ _COLLECT_SCRIPT = """
 }
 """
 
+_RESOLUTION_CACHE: dict[str, list[str] | None] = {}
+
+
+def _literal_ip(host: str):
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
 
 def is_private_host(hostname: str) -> bool:
     """True if the host is loopback, private, link-local or metadata."""
@@ -74,9 +93,8 @@ def is_private_host(hostname: str) -> bool:
         return True
     if host.endswith(".local") or host.endswith(".internal") or host.endswith(".localhost"):
         return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
+    ip = _literal_ip(host)
+    if ip is None:
         return False
     return bool(
         ip.is_private
@@ -88,62 +106,69 @@ def is_private_host(hostname: str) -> bool:
     )
 
 
-def is_visitable_url(url: str, *, block_private: bool = True) -> tuple[bool, str]:
+def resolve_host(hostname: str, *, timeout: float = 1.5) -> list[str] | None:
+    """Resolve a hostname to IP strings, with a hard timeout.
+
+    Returns ``None`` when resolution fails or times out.  Results are cached for
+    the life of the process; a sandbox worker is short-lived by design.
+    """
+    host = (hostname or "").strip().strip("[]").lower().rstrip(".")
+    if not host:
+        return None
+    if host in _RESOLUTION_CACHE:
+        return _RESOLUTION_CACHE[host]
+
+    def _lookup() -> list[str]:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        return sorted({str(info[4][0]) for info in infos})
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_lookup)
+        try:
+            addresses = future.result(timeout=timeout)
+        except (FutureTimeout, OSError, UnicodeError):
+            addresses = None
+    finally:
+        # Never block on a hung DNS lookup: the worker thread is a daemon in
+        # practice and the caller must respect the visit deadline.
+        pool.shutdown(wait=False, cancel_futures=True)
+    _RESOLUTION_CACHE[host] = addresses
+    return addresses
+
+
+def resolves_to_private(hostname: str) -> bool:
+    """True if any resolved address is non-routable.
+
+    A hostname that cannot be resolved is *not* treated as private: the browser
+    will fail to connect anyway, and failing closed here would break offline
+    tests.  The navigation itself still has a timeout.
+    """
+    addresses = resolve_host(hostname)
+    if not addresses:
+        return False
+    return any(is_private_host(address) for address in addresses)
+
+
+def is_visitable_url(
+    url: str, *, block_private: bool = True, check_dns: bool = False
+) -> tuple[bool, str]:
     """Validate a URL against the sandbox safety policy."""
     try:
         parsed = urlparse((url or "").strip())
     except ValueError:
         return False, "unparseable url"
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return False, f"scheme not allowed: {parsed.scheme or '(none)'}"
-    if parsed.scheme.lower() in BLOCKED_SCHEMES:
-        return False, f"scheme not allowed: {parsed.scheme}"
+    scheme = parsed.scheme.lower()
+    if scheme not in ALLOWED_SCHEMES or scheme in BLOCKED_SCHEMES:
+        return False, f"scheme not allowed: {scheme or '(none)'}"
     host = parsed.hostname or ""
     if not host:
         return False, "missing hostname"
     if block_private and is_private_host(host):
         return False, f"private or non-routable host blocked: {host}"
+    if block_private and check_dns and resolves_to_private(host):
+        return False, f"host resolves to a private address: {host}"
     return True, ""
-
-
-def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:10.0.0.1 style addresses
-    if mapped is not None:
-        ip = mapped
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
-def host_is_unsafe(host: str) -> str:
-    """Return a reason if the host must not be visited, or '' if it is allowed.
-
-    Stricter than is_private_host: it also blocks single-label names (Docker
-    service names such as 'api'), numeric tricks such as decimal IPs, and any
-    domain whose DNS answer points at a private or internal address.
-    """
-    host = (host or "").strip().strip("[]").lower().rstrip(".")
-    if not host:
-        return "missing hostname"
-    if "." not in host and ":" not in host:
-        return f"single-label host blocked: {host}"
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return ""  # unresolvable: the browser will fail on its own
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
-        except ValueError:
-            continue
-        if _blocked_ip(ip):
-            return f"{host} resolves to a private address"
-    return ""
 
 
 def visit_url(
@@ -162,25 +187,33 @@ def visit_url(
     from playwright.sync_api import sync_playwright  # lazy: sandbox image only
 
     evidence = Evidence(requested_url=url)
-    allowed, reason = is_visitable_url(url, block_private=block_private)
+    allowed, reason = is_visitable_url(url, block_private=block_private, check_dns=True)
     if not allowed:
         evidence.error = f"blocked by sandbox policy: {reason}"
         return evidence
-    if block_private:
-        unsafe = host_is_unsafe(urlparse(url).hostname or "")
-        if unsafe:
-            evidence.error = f"blocked by sandbox policy: {unsafe}"
-            return evidence
 
     deadline = time.monotonic() + max(timeout_seconds, 1.0)
     started = time.monotonic()
     redirects: list[str] = []
 
+    def remaining_ms(*, floor: int = 1000) -> int:
+        return max(int((deadline - time.monotonic()) * 1000), floor)
+
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=headless,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--disable-sync",
+                    "--no-first-run",
+                ],
             )
             try:
                 context = browser.new_context(
@@ -190,21 +223,18 @@ def visit_url(
                     ignore_https_errors=False,
                 )
 
-                unsafe_cache: dict[str, str] = {}
-
-                def _unsafe(host: str) -> str:
-                    if host not in unsafe_cache:
-                        unsafe_cache[host] = host_is_unsafe(host)
-                    return unsafe_cache[host]
-
                 def _route(route) -> None:
                     """Abort anything outside the allow-list (defence in depth)."""
                     request_url = route.request.url
-                    ok, why = is_visitable_url(request_url, block_private=block_private)
-                    if ok and block_private:
-                        why = _unsafe(urlparse(request_url).hostname or "")
-                        ok = not why
-                    if not ok and not why.startswith("unparseable"):
+                    # DNS resolution is only enforced for navigations: doing a
+                    # lookup for every third-party asset would blow the visit
+                    # budget, while literal private hosts are still blocked.
+                    ok, _ = is_visitable_url(
+                        request_url,
+                        block_private=block_private,
+                        check_dns=route.request.is_navigation_request(),
+                    )
+                    if not ok:
                         route.abort()
                     else:
                         route.continue_()
@@ -212,66 +242,82 @@ def visit_url(
                 context.route("**/*", _route)
 
                 page = context.new_page()
-                page.set_default_timeout(max(int((deadline - time.monotonic()) * 1000), 1000))
+                page.set_default_timeout(remaining_ms())
 
                 def _on_response(response) -> None:
                     if response.status in (301, 302, 303, 307, 308):
                         location = response.headers.get("location")
                         if location:
-                            redirects.append(location)
+                            # Relative Location headers are common; resolve
+                            # against the response URL before recording.
+                            redirects.append(urljoin(response.url, location))
 
                 page.on("response", _on_response)
 
                 response = page.goto(
                     url,
                     wait_until="domcontentloaded",
-                    timeout=max(int((deadline - time.monotonic()) * 1000), 1000),
+                    timeout=remaining_ms(),
                 )
 
                 # Settle briefly for client-side rendering, but stay within budget.
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    page.wait_for_timeout(min(1500, int(remaining * 1000)))
+                settle = min(1500, max(int((deadline - time.monotonic()) * 1000), 0))
+                if settle > 0:
+                    page.wait_for_timeout(settle)
 
                 evidence.status_code = response.status if response else None
                 evidence.final_url = page.url
 
                 collected = page.evaluate(_COLLECT_SCRIPT)
 
-                evidence.title = collected.get("title", "")
+                evidence.title = str(collected.get("title", ""))[:500]
                 evidence.text_sample = (collected.get("text", "") or "")[:20000]
-                evidence.iframes = list(collected.get("iframes", []))
+                evidence.iframes = [str(item) for item in collected.get("iframes", [])][:20]
                 evidence.external_script_count = int(collected.get("external_script_count", 0))
                 evidence.num_hidden_inputs = int(collected.get("num_hidden_inputs", 0))
                 evidence.has_password_field = bool(collected.get("has_password_field"))
 
                 final_host = (urlparse(evidence.final_url).hostname or "").lower()
+                final_base = registrable_domain(final_host)
                 forms: list[FormEvidence] = []
                 for raw in collected.get("forms", []):
-                    action_host = (urlparse(raw.get("action", "")).hostname or "").lower()
+                    raw_action = raw.get("action", "") or ""
+                    resolved_action = urljoin(evidence.final_url or url, raw_action)
+                    action_host = (urlparse(resolved_action).hostname or "").lower()
+                    action_base = registrable_domain(action_host)
                     forms.append(
                         FormEvidence(
-                            action=raw.get("action", ""),
-                            method=raw.get("method", "get"),
+                            action=str(resolved_action)[:2048],
+                            method=str(raw.get("method", "get")).lower()[:10],
                             has_password=bool(raw.get("has_password")),
-                            input_names=list(raw.get("input_names", [])),
-                            submits_cross_domain=bool(action_host and final_host and action_host != final_host),
+                            input_names=[str(n)[:100] for n in raw.get("input_names", [])][:25],
+                            submits_cross_domain=bool(
+                                final_base and action_base and action_base != final_base
+                            ),
                         )
                     )
                 evidence.forms = forms
 
-                if screenshot_dir:
+                # Certificate evidence is collected by the sandbox itself, so
+                # the API container never has to make outbound TLS connections.
+                if final_host and deadline - time.monotonic() > 0.2:
+                    evidence.cert = cert_details(
+                        final_host,
+                        timeout=max(0.2, min(5.0, deadline - time.monotonic())),
+                    )
+
+                if screenshot_dir and deadline - time.monotonic() > 0.2:
                     try:
                         target = Path(screenshot_dir)
                         target.mkdir(parents=True, exist_ok=True)
-                        shot = target / f"shot_{int(time.time() * 1000)}.png"
+                        shot = target / f"shot_{uuid.uuid4().hex}.png"
                         page.screenshot(path=str(shot), full_page=False)
                         evidence.screenshot_path = str(shot)
                     except Exception:  # screenshot is best-effort
                         pass
 
-                chain = [url, *[r for r in redirects], evidence.final_url]
-                evidence.redirect_chain = list(dict.fromkeys(chain))
+                chain = [url, *redirects, evidence.final_url]
+                evidence.redirect_chain = list(dict.fromkeys(item for item in chain if item))
                 context.close()
             finally:
                 browser.close()

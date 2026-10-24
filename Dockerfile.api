@@ -11,20 +11,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-
 COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -m pip install \
-    --disable-pip-version-check \
-    --no-cache-dir \
-    --retries 10 \
-    --timeout 180 \
-    --index-url https://pypi.org/simple \
-    -r requirements.txt
-       
 COPY src ./src
 COPY params.yaml ./
+COPY data/raw ./data/raw
 COPY models ./models
+COPY reports ./reports
 
 # Run as a non-root user: the API needs no privileges.
 RUN useradd --create-home --uid 10001 appuser \
@@ -34,6 +28,7 @@ USER appuser
 
 ENV MODEL_DIR=/app/models \
     EVENTS_PATH=/app/data/monitoring/events.jsonl \
+    REPORTS_DIR=/app/reports \
     MONITORING_ENABLED=true \
     SANDBOX_URL=http://sandbox:8080
 

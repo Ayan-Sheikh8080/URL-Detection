@@ -1,6 +1,7 @@
 data:
-  raw_path: data/raw/phiusiil.csv
-  label_positive_is: legitimate                    # PhiUSIIL raw labels: 1 = legitimate, 0 = phishing
+  raw_path: data/raw/sample_urls.csv
+  crawled_path: data/raw/crawled_evidence.jsonl   # may be absent; content/combined configs are then skipped
+  label_positive_is: phishing                     # 1 in the raw CSV means phishing; use "legitimate" for PhiUSIIL
   test_size: 0.2
   random_state: 42
 
@@ -30,3 +31,8 @@ agent:
 monitoring:
   psi_threshold: 0.2
   reference_sample_size: 500
+
+evaluation:
+  compute_cost_usd_per_ms: 0.000000017
+  browser_cost_usd_per_analysis: 0.00004
+  llm_cost_usd_per_analysis: 0.00025
