@@ -34,3 +34,7 @@ data/screenshots/
 .DS_Store
 Thumbs.db
 .coverage
+data/raw/phiusiil.csv
+data/processed/
+mlflow.db
+mlruns/

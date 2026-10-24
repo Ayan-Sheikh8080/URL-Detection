@@ -1,7 +1,6 @@
 data:
-  raw_path: data/raw/sample_urls.csv
-  crawled_path: data/raw/crawled_evidence.jsonl   # may be absent; content/combined configs are then skipped
-  label_positive_is: phishing                     # 1 in the raw CSV means phishing; use "legitimate" for PhiUSIIL
+  raw_path: data/raw/phiusiil.csv
+  label_positive_is: legitimate                    # PhiUSIIL raw labels: 1 = legitimate, 0 = phishing
   test_size: 0.2
   random_state: 42
 
