@@ -37,34 +37,31 @@ class LoadedModel:
     feature_columns: list[str]
     model: Any
     metrics: dict[str, float] = field(default_factory=dict)
+    
     _explainer: Any = field(default=None, repr=False, compare=False)
 
     def predict_proba(self, features: dict[str, float]) -> float:
         row = pd.DataFrame(
             [{col: float(features.get(col, 0.0)) for col in self.feature_columns}],
             columns=self.feature_columns,
+            dtype=float,
         )
-        # NumPy input keeps serving independent of whether the pipeline was fit
-        # on a DataFrame or an array (and avoids feature-name warnings).
-        proba = self.model.predict_proba(row.to_numpy(dtype=float))
+        proba = self.model.predict_proba(row)
         return float(proba[0][1])
 
-    def top_factors(self, features: dict[str, float], k: int = 5) -> list[dict[str, Any]]:
-        """Per-feature contributions toward the phishing score.
-
-        For linear models this is exact (coefficient x scaled value).  For tree
-        ensembles SHAP's TreeExplainer is used when available; otherwise a signed
-        impurity-importance fallback keeps the API available offline.
-        """
+    def top_factors(
+        self, features: dict[str, float], k: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return the strongest feature contributions toward phishing risk."""
         original = np.array(
-            [float(features.get(c, 0.0)) for c in self.feature_columns], dtype=float
+            [float(features.get(c, 0.0)) for c in self.feature_columns],
+            dtype=float,
         )
         estimator = self.model
         scaled = original.copy()
 
-        # Unwrap sklearn Pipeline(StandardScaler -> estimator)
         if hasattr(estimator, "named_steps"):
-            scaler = getattr(self.model, "named_steps", {}).get("scaler")
+            scaler = estimator.named_steps.get("scaler")
             if scaler is not None and hasattr(scaler, "mean_"):
                 scale = np.where(scaler.scale_ == 0, 1.0, scaler.scale_)
                 scaled = (original - scaler.mean_) / scale
@@ -92,6 +89,7 @@ class LoadedModel:
 
         order = np.argsort(-np.abs(contributions))[:k]
         factors = []
+
         for i in order:
             contribution = float(contributions[i])
             factors.append(
@@ -109,7 +107,39 @@ class LoadedModel:
                     "method": method,
                 }
             )
+
         return factors
+
+    def _shap_contributions(
+        self, estimator: Any, scaled: np.ndarray
+    ) -> np.ndarray | None:
+        try:
+            import shap
+
+            if self._explainer is None:
+                self._explainer = shap.TreeExplainer(estimator)
+            raw = self._explainer.shap_values(scaled.reshape(1, -1))
+        except Exception:  # noqa: BLE001
+            return None
+
+        if isinstance(raw, list):
+            raw = raw[-1] if len(raw) > 1 else raw[0]
+
+        array = np.asarray(raw, dtype=float)
+        if array.ndim == 3:
+            array = (
+                array[0, :, -1]
+                if array.shape[0] == 1
+                else array[:, :, -1].mean(axis=0)
+            )
+        elif array.ndim == 2:
+            array = array[0] if array.shape[0] == 1 else array.mean(axis=0)
+
+        if array.ndim != 1 or len(array) != len(self.feature_columns):
+            return None
+
+        return array
+
 
     def _shap_contributions(self, estimator, scaled: np.ndarray) -> np.ndarray | None:
         try:

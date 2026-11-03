@@ -20,6 +20,7 @@ import csv
 import json
 import sys
 from pathlib import Path
+import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -77,6 +78,7 @@ def _load_url_list(path: Path) -> list[tuple[str, int]]:
     return rows
 
 
+
 def _url_benchmark(args: argparse.Namespace) -> dict:
     urls = _load_url_list(args.urls)
     if not urls:
@@ -88,21 +90,32 @@ def _url_benchmark(args: argparse.Namespace) -> dict:
         fallback = registry.load_best()
         if getattr(fallback, "config", None) == "url_only":
             model = fallback
+
     if model is None:
-        return {"available": False, "reason": "no URL-only model available (run train first)"}
+        return {
+            "available": False,
+            "reason": "no URL-only model available (run train first)",
+        }
 
     try:
         from src.features.url_features import extract_url_features
 
         y_true = [label for _, label in urls]
-        y_pred = []
         y_proba = []
+
         for url, _ in urls:
-            proba = model.predict_proba(extract_url_features(url))
-            y_proba.append(proba)
-            y_pred.append(1 if proba >= 0.5 else 0)
+            features = extract_url_features(url)
+            probability = float(model.predict_proba(features))
+            y_proba.append(probability)
+
+        y_pred = [1 if probability >= 0.5 else 0 for probability in y_proba]
         metrics = binary_metrics(y_true, y_pred, y_proba)
-        return {"available": True, "n_samples": len(urls), "metrics": metrics}
+
+        return {
+            "available": True,
+            "n_samples": len(urls),
+            "metrics": metrics,
+        }
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": str(exc)[:200]}
 
