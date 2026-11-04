@@ -1,8 +1,8 @@
 {
   "models": {
     "url_only": {
-      "model_name": "logistic_regression",
-      "artifact": "url_only__logistic_regression.joblib",
+      "model_name": "xgboost",
+      "artifact": "url_only__xgboost.joblib",
       "feature_columns": [
         "url_length",
         "host_length",
@@ -33,24 +33,24 @@
         "is_punycode"
       ],
       "metrics": {
-        "accuracy": 0.9692,
-        "accuracy_std": 0.0377,
-        "precision": 0.975,
-        "precision_std": 0.05,
-        "recall": 0.9714,
-        "recall_std": 0.0572,
-        "f1": 0.9713,
-        "f1_std": 0.0353,
-        "roc_auc": 1.0,
-        "roc_auc_std": 0.0,
+        "accuracy": 0.9958,
+        "accuracy_std": 0.0002,
+        "precision": 0.9989,
+        "precision_std": 0.0002,
+        "recall": 0.9913,
+        "recall_std": 0.0005,
+        "f1": 0.9951,
+        "f1_std": 0.0002,
+        "roc_auc": 0.9982,
+        "roc_auc_std": 0.0002,
         "confusion_matrix": [
           [
-            31,
-            1
+            107793,
+            87
           ],
           [
-            1,
-            31
+            696,
+            79720
           ]
         ],
         "n_folds": 5
