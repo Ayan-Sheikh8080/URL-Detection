@@ -37,7 +37,7 @@ class LoadedModel:
     feature_columns: list[str]
     model: Any
     metrics: dict[str, float] = field(default_factory=dict)
-    
+
     _explainer: Any = field(default=None, repr=False, compare=False)
 
     def predict_proba(self, features: dict[str, float]) -> float:
