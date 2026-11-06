@@ -1,177 +1,202 @@
-import os
-import json
+"""Validate, normalize, deduplicate, and version the training CSV."""
+
+import argparse
+import csv
 import hashlib
-import pandas as pd
-from datetime import datetime
+import json
+import math
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
+from src.agent.features import (
+    CONTENT_MODEL_FEATURE_NAMES,
+    MAX_IFRAME_COUNT,
+    MAX_PAGE_TITLE_LENGTH,
+)
+from src.ml.features import parse_http_url
 
-# Configuration
-DATA_RAW_PATH = Path("data/raw/sample_urls.csv")
-PROCESSED_PATH = Path("data/processed/urls_processed.csv")
-META_PATH = Path("data/metadata/dataset_meta.json")
-DVC_FILE = Path("dvc.yaml")
-PARAMS_FILE = Path("params.yaml")
+ROOT = Path(__file__).resolve().parents[2]
+RAW_PATH = ROOT / "data" / "raw" / "PhiUSIIL_Phishing_URL_Dataset.csv"
+PROCESSED_PATH = ROOT / "data" / "processed" / "urls_processed.csv"
+METADATA_PATH = ROOT / "data" / "metadata" / "dataset_meta.json"
+PAGE_MODEL_FEATURES = CONTENT_MODEL_FEATURE_NAMES
+PHIUSIIL_PAGE_COLUMNS = {
+    "has_password_field": "HasPasswordField",
+    "has_external_form": "HasExternalFormSubmit",
+    "iframes_count": "NoOfiFrame",
+    "redirect_count": "NoOfURLRedirect",
+    "title_length": "Title",
+    "is_https": "IsHTTPS",
+}
 
-def validate_data():
-    """Validate the raw dataset for missing values, invalid URLs, and label issues."""
-    print("=" * 60)
-    print("DATA VALIDATION")
-    print("=" * 60)
-    
-    issues = []
-    
-    # Check if raw data exists
-    if not DATA_RAW_PATH.exists():
-        print(f"ERROR: Raw data not found at {DATA_RAW_PATH}")
-        return False
-    
-    # Load data
+
+class DatasetValidationError(ValueError):
+    """Raised when dataset structure or labels are unusable."""
+
+
+def normalize_url(value: str, *, allow_credentials: bool = False) -> str:
+    value = value.strip()
+    if "://" not in value:
+        value = f"https://{value}"
+    parse_http_url(value, allow_credentials=allow_credentials)
+    return value
+
+
+def _numeric_feature(value: str, row_number: int, column: str, *, binary: bool = False) -> float:
     try:
-        df = pd.read_csv(DATA_RAW_PATH)
-    except Exception as e:
-        print(f"ERROR: Failed to load CSV: {e}")
-        return False
-    
-    # Check for missing values
-    if df.isnull().any().any():
-        missing_count = df.isnull().sum().sum()
-        issues.append(f"Missing values found: {missing_count} total")
-        print(f"⚠ WARNING: Missing values found: {missing_count} total")
-    
-    # Check for required columns
-    required_cols = ['url', 'label', 'source']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        issues.append(f"Missing required columns: {missing_cols}")
-        print(f"ERROR: Missing required columns: {missing_cols}")
-        return False
-    
-    # Validate URLs
-    import re
-    url_pattern = re.compile(r'^https?://[^\s]+$')
-    invalid_urls = []
-    for url in df['url']:
-        if not url_pattern.match(str(url)):
-            invalid_urls.append(str(url))
-    
-    if invalid_urls:
-        issues.append(f"Invalid URLs found: {len(invalid_urls)}")
-        print(f"⚠ WARNING: Invalid URLs found: {len(invalid_urls)}")
-    
-    # Validate labels
-    valid_labels = {0, 1}
-    invalid_labels = df[~df['label'].isin(valid_labels)]['label'].unique().tolist()
-    if invalid_labels:
-        issues.append(f"Invalid labels found: {invalid_labels}")
-        print(f"⚠ WARNING: Invalid labels found: {invalid_labels}")
-    
-    # Check for single class data
-    if len(df['label'].unique()) < 2:
-        issues.append("Single class data - only one label present")
-        print(f"⚠ WARNING: Single class data - only label {df['label'].iloc[0]} present")
-    
-    # Report
-    print(f"Dataset shape: {df.shape}")
-    print(f"Class distribution: {df['label'].value_counts().to_dict()}")
-    print(f"Sources: {df['source'].unique().tolist()}")
-    
-    if issues:
-        print(f"\nIssues found: {len(issues)}")
-        for issue in issues:
-            print(f"  - {issue}")
-        return False
-    else:
-        print("\n✓ Data validation passed")
-        return True
+        numeric = float(value)
+    except (TypeError, ValueError):
+        raise DatasetValidationError(
+            f"Row {row_number} has invalid numeric value for {column}: {value!r}"
+        ) from None
+    if not math.isfinite(numeric) or numeric < 0 or (binary and numeric not in (0, 1)):
+        raise DatasetValidationError(
+            f"Row {row_number} has out-of-range value for {column}: {value!r}"
+        )
+    return numeric
 
-def deduplicate_data():
-    """Remove duplicate URLs from the dataset."""
-    print("\n" + "=" * 60)
-    print("DUPLICATE REMOVAL")
-    print("=" * 60)
-    
-    df = pd.read_csv(DATA_RAW_PATH)
-    original_count = len(df)
-    
-    # Remove duplicates based on URL
-    df_deduped = df.drop_duplicates(subset=['url'], keep='first')
-    dedup_count = original_count - len(df_deduped)
-    
-    print(f"Original rows: {original_count}")
-    print(f"After dedup: {len(df_deduped)}")
-    print(f"Removed: {dedup_count} duplicates")
-    
-    return df_deduped
 
-def compute_dataset_hash(filepath):
-    """Compute SHA-256 hash of dataset file for versioning."""
-    sha256_hash = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdump()
+def prepare_dataset(raw_path: Path = RAW_PATH) -> dict:
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {raw_path}")
 
-def generate_metadata(df_deduped):
-    """Generate dataset metadata for DVC tracking."""
-    print("\n" + "=" * 60)
-    print("GENERATING DATASET METADATA")
-    print("=" * 60)
-    
-    # Compute hash
-    file_hash = compute_dataset_hash(DATA_RAW_PATH)
-    
-    # Class distribution
-    class_counts = df_deduped['label'].value_counts().to_dict()
-    class_share = {str(k): v / len(df_deduped) for k, v in class_counts.items()}
-    
-    meta = {
-        "row_count": int(len(df_deduped)),
-        "column_names": list(df_deduped.columns),
-        "class_distribution": class_counts,
-        "class_share": class_share,
-        "source": "sample_urls.csv",
-        "dataset_hash": file_hash,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "version": "1.0.0"
+    issues: list[dict] = []
+    by_url: dict[str, dict] = {}
+    duplicate_rows = 0
+    input_rows = 0
+    with raw_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = set(reader.fieldnames or [])
+        is_phiusiil = "URL" in fieldnames
+        required = (
+            {"URL", "label", *PHIUSIIL_PAGE_COLUMNS.values()}
+            if is_phiusiil
+            else {"url", "label", "source"}
+        )
+        missing_columns = required.difference(fieldnames)
+        if missing_columns:
+            raise DatasetValidationError(
+                f"Dataset is missing required columns: {', '.join(sorted(missing_columns))}"
+            )
+        for row_number, row in enumerate(reader, start=2):
+            input_rows += 1
+            raw_url = (row.get("URL" if is_phiusiil else "url") or "").strip()
+            raw_label = (row.get("label") or "").strip()
+            source = "PhiUSIIL" if is_phiusiil else (row.get("source") or "").strip()
+            if not raw_url or not raw_label or not source:
+                issues.append({"row": row_number, "issue": "missing required value"})
+                continue
+            try:
+                source_label = int(raw_label)
+                if source_label not in (0, 1):
+                    raise ValueError
+            except ValueError:
+                raise DatasetValidationError(
+                    f"Row {row_number} has invalid binary label {raw_label!r}"
+                ) from None
+            label = 1 - source_label if is_phiusiil else source_label
+            try:
+                url = normalize_url(raw_url, allow_credentials=is_phiusiil)
+            except ValueError as error:
+                issues.append({"row": row_number, "issue": f"invalid URL: {error}"})
+                continue
+            processed_row = {"url": url, "label": label, "source": source}
+            if is_phiusiil:
+                for feature, column in PHIUSIIL_PAGE_COLUMNS.items():
+                    value = row.get(column) or ""
+                    if feature == "title_length":
+                        processed_row[feature] = float(
+                            min(len(value), MAX_PAGE_TITLE_LENGTH)
+                        )
+                    else:
+                        numeric = _numeric_feature(
+                            value,
+                            row_number,
+                            column,
+                            binary=feature in {
+                                "has_password_field",
+                                "has_external_form",
+                                "is_https",
+                            },
+                        )
+                        processed_row[feature] = (
+                            min(numeric, MAX_IFRAME_COUNT)
+                            if feature == "iframes_count"
+                            else numeric
+                        )
+            previous = by_url.get(url)
+            if previous:
+                if previous["label"] != label:
+                    raise DatasetValidationError(
+                        f"Conflicting labels for duplicate URL {url}"
+                    )
+                duplicate_rows += 1
+                if not is_phiusiil:
+                    issues.append({"row": row_number, "issue": "duplicate URL"})
+                continue
+            by_url[url] = processed_row
+
+    if input_rows == 0:
+        raise DatasetValidationError("Dataset contains no records")
+    if not by_url:
+        raise DatasetValidationError("No valid records remain after validation")
+    labels = {row["label"] for row in by_url.values()}
+    if labels != {0, 1}:
+        raise DatasetValidationError("Training data must contain both label classes")
+
+    processed = list(by_url.values())
+    counts = Counter(str(row["label"]) for row in processed)
+    hasher = hashlib.sha256()
+    with raw_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    raw_hash = hasher.hexdigest()
+    try:
+        source_file = raw_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        source_file = raw_path.name
+    columns = ["url", "label", "source"]
+    if is_phiusiil:
+        columns.extend(PAGE_MODEL_FEATURES)
+    metadata = {
+        "version": "1.0.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_file": source_file,
+        "source_sha256": raw_hash,
+        "input_rows": input_rows,
+        "processed_rows": len(processed),
+        "duplicate_rows": duplicate_rows,
+        "label_distribution": dict(counts),
+        "issues": issues,
+        "columns": columns,
+        "source_label_mapping": (
+            {"0": "phishing", "1": "legitimate"}
+            if is_phiusiil
+            else {"0": "legitimate", "1": "phishing"}
+        ),
     }
-    
-    # Ensure output directory exists
-    META_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write metadata
-    with open(META_PATH, 'w') as f:
-        json.dump(meta, f, indent=2)
-    
-    print(f"Metadata written to {META_PATH}")
-    print(f"  Rows: {meta['row_count']}")
-    print(f"  Class distribution: {meta['class_distribution']}")
-    print(f"  Dataset hash: {file_hash[:16]}...")
-    
-    return meta
 
-def main():
-    """Main preparation pipeline step."""
-    print("Phishing URL Data Preparation Pipeline")
-    print("=" * 60)
-    
-    # Step 1: Validate
-    if not validate_data():
-        print("\n⚠ Validation had issues, but continuing...")
-    
-    # Step 2: Deduplicate
-    df_deduped = deduplicate_data()
-    
-    # Step 3: Generate metadata
-    meta = generate_metadata(df_deduped)
-    
-    # Step 4: Save processed data
     PROCESSED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df_deduped.to_csv(PROCESSED_PATH, index=False)
-    print(f"\nProcessed data saved to {PROCESSED_PATH}")
-    
-    print("\n" + "=" * 60)
-    print("PREPARATION COMPLETE")
-    print("=" * 60)
+    METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with PROCESSED_PATH.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=metadata["columns"])
+        writer.writeheader()
+        writer.writerows(processed)
+    METADATA_PATH.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    print(json.dumps(metadata, indent=2))
+    return metadata
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict", action="store_true", help="fail if any rows need cleanup")
+    args = parser.parse_args()
+    metadata = prepare_dataset()
+    if args.strict and metadata["issues"]:
+        print(f"Strict validation failed with {len(metadata['issues'])} issue(s)")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

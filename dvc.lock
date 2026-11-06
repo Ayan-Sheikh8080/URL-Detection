@@ -1,0 +1,74 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python -m src.data.prepare --strict
+    deps:
+    - path: data/raw/PhiUSIIL_Phishing_URL_Dataset.csv
+      hash: md5
+      md5: 769ba530b3629c4c2f9896abf642aefa
+      size: 56854345
+    - path: src/agent/features.py
+      hash: md5
+      md5: a5286578dfa4f3a69aeef04851e576c4
+      size: 3619
+    - path: src/data/prepare.py
+      hash: md5
+      md5: eaf0be70df21c115457b7cbebdfd9909
+      size: 8009
+    - path: src/ml/features.py
+      hash: md5
+      md5: 3207770959835929199ed8aaffc7c6e4
+      size: 4002
+    outs:
+    - path: data/metadata/dataset_meta.json
+      hash: md5
+      md5: 53e212110b0af7f7722ebf824882723d
+      size: 676
+    - path: data/processed/urls_processed.csv
+      hash: md5
+      md5: 52758544c365936a4d20b5b386110fa5
+      size: 17177798
+  train:
+    cmd: python -m src.training.train
+    deps:
+    - path: data/processed/urls_processed.csv
+      hash: md5
+      md5: 52758544c365936a4d20b5b386110fa5
+      size: 17177798
+    - path: src/agent/checks.py
+      hash: md5
+      md5: fc6a7520d879094afb9ceb71e6e74183
+      size: 7126
+    - path: src/agent/features.py
+      hash: md5
+      md5: a5286578dfa4f3a69aeef04851e576c4
+      size: 3619
+    - path: src/agent/reasoning.py
+      hash: md5
+      md5: 032f9f996bf5a16acf539743ed29c8c9
+      size: 7642
+    - path: src/ml/features.py
+      hash: md5
+      md5: 3207770959835929199ed8aaffc7c6e4
+      size: 4002
+    - path: src/training/train.py
+      hash: md5
+      md5: 69981d8127f38cef0f928e0ccb9b67b3
+      size: 10633
+    outs:
+    - path: models/index.json
+      hash: md5
+      md5: c00817fefa77ce9855eee538ee6e7806
+      size: 2338
+    - path: models/model_bundle.joblib
+      hash: md5
+      md5: e7870b19dbabf7c72c0a5b6dfdbd1f55
+      size: 5933470
+    - path: models/reference_features.csv
+      hash: md5
+      md5: 1ca0af319db89abf45948cadcf08d489
+      size: 23511682
+    - path: reports/evaluation.json
+      hash: md5
+      md5: ca52512110fcb1de67b4f7a5e3f03ae8
+      size: 6262

@@ -1,53 +1,35 @@
-// Main entry point for the Phishing URL Analyzer API
-const express = require('express');
-const router = express.Router();
+// npm start uses the project's Python environment to run the FastAPI service.
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
 
-const app = express();
-const PORT = process.env.PORT || 8000;
-
-app.use(express.json());
-app.use('/api', router);
-
-// Health check endpoint
-router.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'phishing-url-analyzer' });
+const root = path.resolve(__dirname, '..');
+const localPython = process.platform === 'win32'
+  ? path.join(root, '.venv', 'Scripts', 'python.exe')
+  : path.join(root, '.venv', 'bin', 'python');
+const python = process.env.PYTHON
+  || (fs.existsSync(localPython) ? localPython : (process.platform === 'win32' ? 'python' : 'python3'));
+const child = spawn(python, ['-m', 'src.start'], {
+  cwd: root,
+  env: process.env,
+  stdio: 'inherit',
 });
 
-// URL analysis endpoint
-router.post('/analyze', async (req, res) => {
-  const { url } = req.body;
-  
-  if (!url) {
-    return res.status(400).json({ error: 'URL is required' });
-  }
-  
-  try {
-    // TODO: Integrate with the browser agent and ML model
-    // For now, return a placeholder response
-    res.json({
-      verdict: 'pending',
-      confidence: 0.0,
-      reasons: 'Analysis queued',
-      evidence: {
-        redirect_chain: [],
-        final_domain: null,
-        forms: [],
-        iframes: [],
-        page_text: '',
-        certificate: null
-      }
-    });
-  } catch (error) {
-    console.error('Analysis error:', error);
-    res.status(500).json({ error: 'Analysis failed' });
+child.on('error', (error) => {
+  console.error(`Unable to start Python API: ${error.message}`);
+  process.exitCode = 1;
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.exitCode = 1;
+  } else {
+    process.exitCode = code === null ? 1 : code;
   }
 });
 
-// Root endpoint
-router.get('/', (req, res) => {
-  res.json({ message: 'Phishing URL Analyzer API' });
-});
-
-app.listen(PORT, () => {
-  console.log(`Phishing URL Analyzer running on port ${PORT}`);
-});
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    if (!child.killed) child.kill(signal);
+  });
+}

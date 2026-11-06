@@ -1,360 +1,274 @@
-import os
+"""Train and compare URL-only, content-only, and combined phishing models."""
+
 import json
+import logging
+import os
+import time
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import FeatureHasher
-from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.xgboost import XGBoostClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
-import mlflow
-import mlflow.sklearn
-from pathlib import Path
+from xgboost import XGBClassifier
 
-# Configuration
-DATA_PROCESSED_PATH = Path("data/processed/urls_processed.csv")
-MODELS_DIR = Path("models")
-METRICS_DIR = Path("reports")
-MLFLOW_EXPERIMENT = "phishing-link-detection"
+try:
+    import mlflow
+except ImportError:
+    mlflow = None
 
-# Ensure output directories exist
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-METRICS_DIR.mkdir(parents=True, exist_ok=True)
+from src.agent.features import (
+    CONTENT_FEATURE_NAMES,
+    CONTENT_MODEL_FEATURE_NAMES,
+    extract_content_features,
+)
+from src.data.prepare import PROCESSED_PATH, ROOT, normalize_url
+from src.ml.features import URL_FEATURE_NAMES, extract_url_features
 
-
-def load_processed_data():
-    """Load the processed dataset from preparation step."""
-    if not DATA_PROCESSED_PATH.exists():
-        raise FileNotFoundError(f"Processed data not found at {DATA_PROCESSED_PATH}")
-    df = pd.read_csv(DATA_PROCESSED_PATH)
-    print(f"Loaded processed data: {df.shape}")
-    return df
-
-
-def extract_url_features(df):
-    """Extract 27 lexical URL features from URLs."""
-    features_list = []
-    
-    for url in df['url']:
-        url_str = str(url)
-        try:
-            # Import URL parsing features
-            parsed_url = __import__('urllib.parse').urlparse(url_str)
-            
-            feature_dict = {
-                'url_length': len(url_str),
-                'https': 1 if parsed_url.scheme == 'https' else 0,
-                'domain_length': len(parsed_url.netloc) if parsed_url.netloc else 0,
-                'path_length': len(parsed_url.path) if parsed_url.path else 0,
-                'symbol_count': len([c for c in url_str if not c.isalnum() and c not in '/:.']),
-                'has_ip_address': 1 if bool(__import__('re').match(r'^\d+\.\d+\.\d+\.\d+$', parsed_url.hostname or '')) else 0,
-                'at_symbol': 1 if '@' in url_str else 0,
-                'double_slash': 1 if '//' in url_str and not url_str.startswith('https://') else 0,
-                'subdomain_count': len(parsed_url.hostname.split('.')) - 2 if parsed_url.hostname else 0,
-                'has_query': 1 if parsed_url.query else 0,
-                'has_fragment': 1 if parsed_url.fragment else 0,
-                'path_depth': parsed_url.path.count('/') if parsed_url.path else 0,
-                'file_extension': parsed_url.path.split('.')[-1] if '.' in parsed_url.path else '',
-                'hostname_length': len(parsed_url.hostname or ''),
-                'num_params': len(parsed_url.query.split('&')) if parsed_url.query else 0,
-                'parameter_names': '|'.join([p.split('=')[0] for p in parsed_url.query.split('&') if '=' in p]) if parsed_url.query else '',
-                'has_login_keyword': 1 if any(kw in url_str.lower() for kw in ['login', 'signin', 'verify', 'account', 'secure']) else 0,
-                'has_financial_keyword': 1 if any(kw in url_str.lower() for kw in ['paypal', 'bank', 'amazon', 'credit', 'card']) else 0,
-                'uses_shortener': 1 if any(shortener in url_str.lower() for shortener in ['bit.ly', 'tiny.url', 'short.link', 'goo.gl']) else 0,
-                'has_trailing_slash': 1 if url_str.rendswith('/') else 0,
-                'num_digits': sum(c.isdigit() for c in parsed_url.hostname or ''),
-                'has_suffix': 1 if parsed_url.hostname and parsed_url.hostname.endswith(('.ph', '.top', '.club', '.xyz')) else 0,
-                'tld': parsed_url.hostname.split('.')[-1] if parsed_url.hostname else '',
-            }
-            features_list.append(feature_dict)
-        except Exception as e:
-            print(f"Warning: Failed to parse URL {url_str}: {e}")
-            # Add default features for failed URL
-            features_list.append({k: 0 for k in feature_dict.keys()})
-    
-    return pd.DataFrame(features_list)
+RAW_EVIDENCE_PATH = ROOT / "data" / "raw" / "crawled_evidence.jsonl"
+MODELS_DIR = ROOT / "models"
+REPORTS_DIR = ROOT / "reports"
+MODEL_PATH = MODELS_DIR / "model_bundle.joblib"
+EVALUATION_PATH = REPORTS_DIR / "evaluation.json"
+MODEL_FAMILIES = {
+    "logistic_regression": lambda: LogisticRegression(
+        max_iter=1000, class_weight="balanced", random_state=42
+    ),
+    "random_forest": lambda: RandomForestClassifier(
+        n_estimators=100, class_weight="balanced", max_depth=6, random_state=42
+    ),
+    "xgboost": lambda: XGBClassifier(
+        n_estimators=50,
+        max_depth=3,
+        learning_rate=0.08,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        eval_metric="logloss",
+        n_jobs=1,
+        random_state=42,
+    ),
+}
+logger = logging.getLogger(__name__)
 
 
-def train_models(X_train, y_train, X_test, y_test):
-    """Train three model families in three configurations."""
-    results = {}
-    
-    # Model families
-    model_families = {
-        'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
-        'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10),
-        'XGBoost': XGBoostClassifier(n_estimators=100, random_state=42, max_depth=6, use_label_encoder=False, eval_metric='logloss')
-    }
-    
-    # Configuration 1: URL-only features
-    print("\n" + "=" * 60)
-    print("CONFIGURATION 1: URL-only training")
-    print("=" * 60)
-    
-    url_only_models = {}
-    for name, model in model_families.items():
-        print(f"\nTraining {name} on URL-only features...")
-        model.fit(X_train, y_train)
-        url_only_models[name] = model
-        
-        # Evaluate
-        y_pred = model.predict(X_test)
-        precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
-        
-        # Log to MLflow
-        with mlflow.start_run():
-            mlflow.log_param('model_family', name)
-            mlflow.log_param('config', 'url_only')
-            mlflow.log_metric('precision', precision)
-            mlflow.log_metric('recall', recall)
-            mlflow.log_metric('f1', f1)
-            
-            # Confusion matrix
-            cm = confusion_matrix(y_test, y_pred)
-            mlflow.log_matrix(confusion_matrix(y_test, y_pred), 'confusion_matrix.png')
-            
-            # Log model
-            mlflow.sklearn.log_model(model, f'model_{name.lower().replace(" ", "_")}')
-        
-        results[f'url_only_{name}'] = {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'model': model
-        }
-        
-        print(f"  F1 Score: {f1:.4f}")
-    
-    # Configuration 2: Content-only features (page evidence)
-    print("\n" + "=" * 60)
-    print("CONFIGURATION 2: Content-only training")
-    print("=" * 60)
-    
-    # For this synthetic dataset, we'll use a subset of features that could represent page evidence
-    content_features = ['url_length', 'symbol_count', 'has_https', 'domain_length', 'has_ip_address',
-                        'at_symbol', 'double_slash', 'subdomain_count', 'has_login_keyword',
-                        'has_financial_keyword', 'uses_shortener', 'has_trailing_slash']
-    
-    content_train = X_train[content_features]
-    content_test = X_test[content_features]
-    
-    content_models = {}
-    for name, model in model_families.items():
-        print(f"\nTraining {name} on content-only features...")
-        model.fit(content_train, y_train)
-        content_models[name] = model
-        
-        # Evaluate
-        y_pred = model.predict(content_test)
-        precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
-        
-        # Log to MLflow
-        with mlflow.start_run():
-            mlflow.log_param('model_family', name)
-            mlflow.log_param('config', 'content_only')
-            mlflow.log_metric('precision', precision)
-            mlflow.log_metric('recall', recall)
-            mlflow.log_metric('f1', f1)
-        
-        results[f'content_only_{name}'] = {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'model': model
-        }
-        
-        print(f"  F1 Score: {f1:.4f}")
-    
-    # Configuration 3: Combined features (URL + page evidence)
-    print("\n" + "=" * 60)
-    print("CONFIGURATION 3: Combined training (URL + page features)")
-    print("=" * 60)
-    
-    # Combine URL features with page evidence features
-    combined_features = list(X_train.columns)  # All URL features
-    
-    # Add synthetic page evidence features
-    page_evidence_features = ['forms_count', 'iframes_count', 'has_password_field', 'has_submit_different_domain',
-                              'has_iframe', 'page_text_length', 'title_length', 'certificate_valid',
-                              'redirect_count', 'form_action_external']
-    
-    # For synthetic data, add placeholder page evidence features
-    X_train_combined = X_train.copy()
-    X_test_combined = X_test.copy()
-    
-    for feat in page_evidence_features:
-        X_train_combined[feat] = np.random.randint(0, 2, len(X_train))
-        X_test_combined[feat] = np.random.randint(0, 2, len(X_test))
-    
-    combined_models = {}
-    for name, model in model_families.items():
-        print(f"\nTraining {name} on combined features...")
-        model.fit(X_train_combined, y_train)
-        combined_models[name] = model
-        
-        # Evaluate
-        y_pred = model.predict(X_test_combined)
-        precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
-        
-        # Log to MLflow
-        with mlflow.start_run():
-            mlflow.log_param('model_family', name)
-            mlflow.log_param('config', 'combined')
-            mlflow.log_metric('precision', precision)
-            mlflow.log_metric('recall', recall)
-            mlflow.log_metric('f1', f1)
-        
-        results[f'combined_{name}'] = {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'model': model
-        }
-        
-        print(f"  F1 Score: {f1:.4f}")
-    
-    return url_only_models, content_models, combined_models
+def _read_training_data() -> tuple[list[dict], list[dict]]:
+    if not PROCESSED_PATH.exists():
+        raise FileNotFoundError(
+            f"Prepared data not found at {PROCESSED_PATH}; run python -m src.data.prepare first"
+        )
+    frame = pd.read_csv(PROCESSED_PATH)
+    urls = frame[["url", "label", "source"]].to_dict(orient="records")
+    if set(CONTENT_MODEL_FEATURE_NAMES).issubset(frame.columns):
+        return urls, frame.to_dict(orient="records")
+
+    labels = {row["url"]: int(row["label"]) for row in urls}
+    evidence_rows = []
+    with RAW_EVIDENCE_PATH.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            try:
+                evidence = json.loads(line)
+                normalized = normalize_url(evidence["url"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"Invalid evidence record on line {line_number}: {error}") from error
+            if normalized in labels:
+                evidence_rows.append({
+                    "url": normalized,
+                    "label": labels[normalized],
+                    "evidence": evidence,
+                })
+    if not evidence_rows:
+        raise ValueError("No crawled evidence records match the validated URL dataset")
+    if len({record["label"] for record in evidence_rows}) != 2:
+        raise ValueError("Crawled evidence must represent both phishing and legitimate URLs")
+    return urls, evidence_rows
 
 
-def main():
-    """Main training pipeline entry point."""
-    print("=" * 60)
-    print("PHISHING URL CLASSIFICATION - TRAINING PIPELINE")
-    print("=" * 60)
-    
-    # Set MLflow tracking
-    mlflow.set_experiment(MLFLOW_EXPERIMENT)
-    
-    # Load data
-    df = load_processed_data()
-    
-    # Extract features
-    print("\nExtracting URL features...")
-    features_df = extract_url_features(df)
-    
-    # Prepare target variable
-    y = df['label'].values
-    
-    # Split data
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(
-        features_df, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
-    print(f"Training set: {X_train.shape}")
-    print(f"Test set: {X_test.shape}")
-    print(f"Class distribution - Train: {np.bincount(y_train)}, Test: {np.bincount(y_test)}")
-    
-    # Train all configurations
-    url_only_models, content_models, combined_models = train_models(X_train, y_train, X_test, y_test)
-    
-    # Generate evaluation report
-    print("\n" + "=" * 60)
-    print("GENERATING EVALUATION REPORT")
-    print("=" * 60)
-    
-    # Collect all results
-    all_results = {}
-    
-    # URL-only results
-    for config_name, results_dict in results.items():
-        if 'url_only' in config_name:
-            model_name = results_dict['model'].__class__.__name__
-            all_results[config_name] = {
-                'f1': results_dict['f1'],
-                'precision': results_dict['precision'],
-                'recall': results_dict['recall'],
-                'model': model_name
-            }
-    
-    # Content-only results
-    for config_name, results_dict in results.items():
-        if 'content_only' in config_name:
-            model_name = results_dict['model'].__class__.__name__
-            all_results[config_name] = {
-                'f1': results_dict['f1'],
-                'precision': results_dict['precision'],
-                'recall': results_dict['recall'],
-                'model': model_name
-            }
-    
-    # Combined results
-    for config_name, results_dict in results.items():
-        if 'combined' in config_name:
-            model_name = results_dict['model'].__class__.__name__
-            all_results[config_name] = {
-                'f1': results_dict['f1'],
-                'precision': results_dict['precision'],
-                'recall': results_dict['recall'],
-                'model': model_name
-            }
-    
-    # Write evaluation report
-    report = {
-        'timestamp': pd.Timestamp.now().isoformat(),
-        'dataset_info': {
-            'rows': len(df),
-            'features': list(features_df.columns)
-        },
-        'results': all_results,
-        'headline': 'Relative F1 improvement of agent over URL-only'
-    }
-    
-    # Calculate improvement
-    url_only_f1 = all_results.get('url_only_Logistic Regression', {}).get('f1', 0)
-    combined_f1 = all_results.get('combined_XGBoost', {}).get('f1', 0)
-    
-    if url_only_f1 > 0:
-        improvement = (combined_f1 - url_only_f1) / url_only_f1 * 100
-        report['improvement'] = {
-            'url_only_f1': url_only_f1,
-            'combined_f1': combined_f1,
-            'improvement_percent': improvement
-        }
-        print(f"URL-only (LR) F1: {url_only_f1:.4f}")
-        print(f"Combined (XGBoost) F1: {combined_f1:.4f}")
-        print(f"Improvement: {improvement:.2f}%")
+def _model_input(rows: list[dict], config: str) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    if config == "url_only":
+        features = [
+            extract_url_features(row["url"], allow_credentials=True)
+            for row in rows
+        ]
+        labels = [int(row["label"]) for row in rows]
+        order = list(URL_FEATURE_NAMES)
     else:
-        report['improvement'] = {
-            'url_only_f1': url_only_f1,
-            'combined_f1': combined_f1,
-            'improvement_percent': 0
-        }
-    
-    # Write report
-    report_path = METRICS_DIR / "evaluation.json"
-    with open(report_path, 'w') as f:
-        json.dump(report, f, indent=2)
-    
-    print(f"\nEvaluation report written to {report_path}")
-    print(f"\n{json.dumps(report, indent=2)}")
-    
-    # Save best models
-    best_combined = max(combined_models.values(), key=lambda m: m.score(X_test_combined, y_test))
-    joblib.dump(best_combined, MODELS_DIR / 'best_model.pkl')
-    print(f"\nBest model saved to {MODELS_DIR / 'best_model.pkl'}")
-    
-    # Save model index
-    model_index = {
-        'version': '1.0.0',
-        'models': {
-            'url_only': {name: {'type': type(m).__name__} for name, m in url_only_models.items()},
-            'content_only': {name: {'type': type(m).__name__} for name, m in content_models.items()},
-            'combined': {name: {'type': type(m).__name__} for name, m in combined_models.items()}
-        }
+        features = []
+        labels = []
+        for row in rows:
+            url_features = extract_url_features(
+                row["url"], allow_credentials=True
+            )
+            content_features = (
+                {name: float(row[name]) for name in CONTENT_MODEL_FEATURE_NAMES}
+                if all(name in row for name in CONTENT_MODEL_FEATURE_NAMES)
+                else extract_content_features(row["url"], row["evidence"])
+            )
+            features.append({
+                **(
+                    {f"url_{key}": value for key, value in url_features.items()}
+                    if config == "combined"
+                    else {}
+                ),
+                **{
+                    f"page_{key}": content_features[key]
+                    for key in CONTENT_MODEL_FEATURE_NAMES
+                },
+            })
+            labels.append(int(row["label"]))
+        order = (
+            [f"url_{key}" for key in URL_FEATURE_NAMES]
+            + [f"page_{key}" for key in CONTENT_MODEL_FEATURE_NAMES]
+            if config == "combined"
+            else [f"page_{key}" for key in CONTENT_MODEL_FEATURE_NAMES]
+        )
+    matrix = pd.DataFrame(features, columns=order).fillna(0.0)
+    return matrix, np.asarray(labels, dtype=int), order
+
+
+def _log_run(config: str, family: str, metrics: dict, feature_count: int) -> None:
+    if mlflow is None:
+        return
+    with mlflow.start_run(run_name=f"{config}-{family}"):
+        mlflow.log_params({
+            "configuration": config,
+            "model_family": family,
+            "feature_count": feature_count,
+            "train_test_split": 0.2,
+            "random_state": 42,
+        })
+        mlflow.log_metrics({
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1": metrics["f1"],
+            "training_seconds": metrics["training_seconds"],
+            "inference_latency_ms_per_url": metrics["inference_latency_ms_per_url"],
+            "estimated_cloud_cost_usd_per_analysis": metrics["estimated_cloud_cost_usd_per_analysis"],
+        })
+
+
+def train_models() -> dict:
+    if not PROCESSED_PATH.exists():
+        raise FileNotFoundError("Run python -m src.data.prepare before training")
+    url_rows, evidence_rows = _read_training_data()
+    datasets = {
+        "url_only": url_rows,
+        "content_only": evidence_rows,
+        "combined": evidence_rows,
     }
-    
-    with open(MODELS_DIR / 'index.json', 'w') as f:
-        json.dump(model_index, f, indent=2)
-    
-    print(f"Model index saved to {MODELS_DIR / 'index.json'}")
-    
-    print("\n" + "=" * 60)
-    print("TRAINING PIPELINE COMPLETE")
-    print("=" * 60)
+
+    if mlflow is None:
+        logger.warning(
+            "MLflow is not installed; evaluation metrics will be written locally only"
+        )
+    else:
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI") or (
+            f"sqlite:///{(ROOT / 'mlflow.db').as_posix()}"
+        )
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment("phishing-url-analysis")
+
+    bundle = {}
+    evaluation = {
+        "dataset_info": {
+            "url_training_rows": len(url_rows),
+            "page_feature_rows": len(evidence_rows),
+            "url_model_features": list(URL_FEATURE_NAMES),
+            "page_runtime_features": list(CONTENT_FEATURE_NAMES),
+            "page_model_features": list(CONTENT_MODEL_FEATURE_NAMES),
+        },
+        "experiment_tracking": "mlflow" if mlflow is not None else "disabled",
+        "configurations": {},
+        "headline": (
+            "Random stratified holdout precision, recall, and F1; "
+            "validate on a separate time-based dataset before deployment"
+        ),
+    }
+
+    for config, rows in datasets.items():
+        matrix, labels, feature_order = _model_input(rows, config)
+        if min(np.bincount(labels, minlength=2)) < 2:
+            raise ValueError(f"{config} data needs at least two records per label")
+        x_train, x_test, y_train, y_test = train_test_split(
+            matrix,
+            labels,
+            test_size=0.2,
+            random_state=42,
+            stratify=labels,
+        )
+        results = {}
+        candidates = []
+        for family, build_model in MODEL_FAMILIES.items():
+            model = build_model()
+            started = time.perf_counter()
+            model.fit(x_train, y_train)
+            training_seconds = time.perf_counter() - started
+            inference_started = time.perf_counter()
+            predictions = model.predict(x_test)
+            inference_latency_ms = (
+                (time.perf_counter() - inference_started) * 1000 / len(x_test)
+            )
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                y_test, predictions, average="binary", zero_division=0
+            )
+            metrics = {
+                "precision": round(float(precision), 4),
+                "recall": round(float(recall), 4),
+                "f1": round(float(f1), 4),
+                "training_seconds": round(training_seconds, 4),
+                "inference_latency_ms_per_url": round(inference_latency_ms, 4),
+                "estimated_cloud_cost_usd_per_analysis": 0.0,
+                "confusion_matrix": confusion_matrix(
+                    y_test, predictions, labels=[0, 1]
+                ).tolist(),
+                "test_rows": int(len(y_test)),
+            }
+            _log_run(config, family, metrics, len(feature_order))
+            results[family] = metrics
+            candidates.append((float(f1), family, model))
+
+        best_score, best_family, best_model = max(
+            candidates, key=lambda result: (result[0], result[1] == "logistic_regression")
+        )
+        bundle[config] = {
+            "model": best_model,
+            "model_family": best_family,
+            "feature_order": feature_order,
+            "metrics": results[best_family],
+        }
+        evaluation["configurations"][config] = {
+            "sample_count": len(rows),
+            "best_model": best_family,
+            "best_holdout_f1": round(best_score, 4),
+            "models": results,
+        }
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, MODEL_PATH)
+
+    reference, _, reference_order = _model_input(evidence_rows, "combined")
+    reference.to_csv(MODELS_DIR / "reference_features.csv", index=False)
+    index = {
+        "version": "1.0.0",
+        "model_artifact": str(MODEL_PATH.relative_to(ROOT)),
+        "feature_order": reference_order,
+        "configurations": {
+            name: {
+                "model_family": item["model_family"],
+                "metrics": item["metrics"],
+            }
+            for name, item in bundle.items()
+        },
+    }
+    (MODELS_DIR / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    EVALUATION_PATH.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
+    print(json.dumps(evaluation, indent=2))
+    print(f"Saved trained model bundle to {MODEL_PATH}")
+    return evaluation
 
 
 if __name__ == "__main__":
-    main()
+    train_models()

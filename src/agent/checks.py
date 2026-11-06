@@ -1,5 +1,6 @@
 import re
-from urllib.parse import urlparse, urlunparse
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 
 def extract_domain_features(final_domain: str, original_url: str) -> Dict[str, Any]:
@@ -35,20 +36,20 @@ def extract_domain_features(final_domain: str, original_url: str) -> Dict[str, A
                 original_tld = original_parts[-1].lower()
                 
                 # Suspicious TLDs
-                suspicious_tlds = ['.top', '.club', '.xyz', '.wang', '.gq', '.ml', '.tk']
+                suspicious_tlds = ['top', 'club', 'xyz', 'wang', 'gq', 'ml', 'tk']
                 if final_tld in suspicious_tlds and original_tld not in suspicious_tlds:
                     features['tld_suspicious'] = True
             
             # Check for subdomain spoofing (e.g., paypal.fake-domain.com)
             if len(final_parts) >= 2:
-                potential_brand = '.'.join(final_parts[-2:])  # last two parts as "brand"
                 suspicious_brands = ['paypal', 'bank', 'amazon', 'microsoft', 'google', 'apple']
-                if any(potential_brand.startswith(brand) or potential_brand == brand 
-                       for brand in suspicious_brands):
-                # Check if the beginning looks like a brand
-                    brand_prefix = potential_brand.split('.')[0].lower()
-                    if brand_prefix in suspicious_brands:
-                        features['lookalike_domain'] = True
+                if any(
+                    brand in final_parts[:-1]
+                    and brand not in original_parts
+                    for brand in suspicious_brands
+                ):
+                    features['lookalike_domain'] = True
+                    features['brand_impersonation'] = True
         
         # Check for brand impersonation in the page context
         # (This would be enhanced with actual page text analysis)
@@ -72,9 +73,9 @@ def check_tls_certificate(cert_info: Dict[str, Any]) -> Dict[str, Any]:
         if cert_info.get('is_valid', False):
             features['certificate_issuer_trusted'] = True
             # Check if issuer is a known CA
-            trusted issuers = ['DigiCert', 'Let''s Encrypt', 'GlobalSign', 'Comodo', 'Amazon']
+            trusted_issuers = ['DigiCert', "Let's Encrypt", 'GlobalSign', 'Comodo', 'Amazon']
             issuer = cert_info.get('issuer', '').lower()
-            if any(trusted in issuer for trusted in trusted issuers):
+            if any(trusted.lower() in issuer for trusted in trusted_issuers):
                 features['certificate_issuer_trusted'] = True
         
         # Check subject matches domain
@@ -88,9 +89,8 @@ def check_tls_certificate(cert_info: Dict[str, Any]) -> Dict[str, Any]:
         if exp_date:
             from datetime import datetime
             try:
-                exp = datetime.strptime(exp_date, '%Y-%m-%d')
-                from datetime import datetime as dt_now
-                if exp < dt_now.now():
+                exp = datetime.strptime(exp_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                if exp < datetime.now(timezone.utc):
                     features['certificate_expired'] = True
                     features['certificate_valid'] = False
             except ValueError:
@@ -150,20 +150,17 @@ def check_for_prompt_injection(page_text: str) -> Dict[str, Any]:
     
     try:
         injection_patterns = [
-            r'ignore previous instructions',
-            r'do not follow',
-            r'system.*prompt',
-            r'hidden.*text',
-            r'<!--.*-->',
-            r'<script.*>',
-            r'\\n\\nASSISTANT',
-            r'\\n\\nUSER',
+            r'\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions\b',
+            r'\b(?:override|disregard)\s+(?:the\s+)?(?:system|previous)\s+prompt\b',
+            r'\b(?:reveal|print|show)\s+(?:the\s+)?system\s+prompt\b',
+            r'\byou\s+are\s+now\s+(?:the\s+)?(?:system|assistant)\b',
+            r'\bdo\s+not\s+follow\s+(?:the\s+)?(?:system|safety)\s+instructions\b',
         ]
         
         page_lower = page_text.lower()
         
         for pattern in injection_patterns:
-            if re.search(pattern, page_lower, re.IGNORECASE):
+            if re.search(pattern, page_lower, re.IGNORECASE | re.DOTALL):
                 features['suspicious_patterns'].append(pattern)
         
         if features['suspicious_patterns']:

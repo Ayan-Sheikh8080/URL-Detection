@@ -1,4 +1,5 @@
 node_modules/
+.venv/
 .env
 *.pkl
 *.h5
@@ -9,5 +10,18 @@ __pycache__/
 *.pyc
 *.pyo
 *.dist
+.pytest_cache/
+.ruff_cache/
+.dvc/cache/
+data/metadata/
+data/processed/
+data/monitoring/
+data/screenshots/
+models/model_bundle.joblib
+models/index.json
+models/reference_features.csv
+reports/
+mlruns/
+mlflow.db
 .env.local
 .DS_Store
