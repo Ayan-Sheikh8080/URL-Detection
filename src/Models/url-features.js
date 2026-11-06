@@ -1,6 +1,4 @@
 // URL feature extraction and ML model
-const { PythonShell } = require('python-shell');
-
 /**
  * Extract features from a URL for ML classification
  * @param {string} url - The URL to extract features from
@@ -27,26 +25,4 @@ function extractUrlFeatures(url) {
   }
 }
 
-/**
- * Run ML model prediction on URL features
- * @param {object} features - URL features extracted
- * @returns {object} Prediction result
- */
-async function predictUrl(features) {
-  // Use Python Shell to run the ML model
-  return new Promise((resolve, reject) => {
-    PythonShell.run('models/predict.py', { features: JSON.stringify(features) }, (errors, results) => {
-      if (errors) {
-        reject(errors);
-      } else {
-        try {
-          resolve(JSON.parse(results[0]));
-        } catch (e) {
-          reject(e);
-        }
-      }
-    });
-  });
-}
-
-module.exports = { extractUrlFeatures, predictUrl };
+module.exports = { extractUrlFeatures };

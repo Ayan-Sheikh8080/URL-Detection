@@ -1,5 +1,5 @@
 // Unit tests for the phishing URL analyzer
-const { extractUrlFeatures } = require('../src/models/url-features');
+const { extractUrlFeatures } = require('../../src/Models/url-features');
 
 describe('URL Feature Extraction', () => {
   test('extracts features from a valid URL', () => {

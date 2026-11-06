@@ -1,45 +1,104 @@
-version: '3.8'
-
 services:
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      - NODE_ENV=development
-      - PORT=8000
-      - AWS_REGION=${AWS_REGION}
-      - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+      PORT: "8000"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      BROWSER_SANDBOX_URL: http://sandbox:8080
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BROWSER_TIMEOUT_MS: "8000"
     depends_on:
-      - sandbox
+      sandbox:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     volumes:
-      - .:/app
+      - screenshots:/app/data/screenshots
+      - monitoring:/app/data/monitoring
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   sandbox:
     build:
       context: .
       dockerfile: Dockerfile.sandbox
+    expose:
+      - "8080"
     environment:
-      - CHROMIUM_FLAGS=--no-sandbox --disable-dev-shm-usage
-      - PORT=8080
-    caps:
-      - capability:
-          - browserName: chrome
-            version: ""
-            alwaysMatch:
-              maxInstances: 5
+      PORT: "8080"
+      BROWSER_TIMEOUT_MS: "8000"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    shm_size: 512m
+    volumes:
+      - screenshots:/app/data/screenshots
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest-ubuntu-py3.11
-    environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=s3://mlflow-artifacts-phishing
+    image: ghcr.io/mlflow/mlflow:v3.3.2
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --default-artifact-root
+      - /mlflow/artifacts
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     volumes:
       - mlflow-data:/mlflow
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
+  screenshots:
+  monitoring:
   mlflow-data:

@@ -1,0 +1,15 @@
+.git
+.venv
+node_modules
+__pycache__
+*.py[cod]
+.env
+.env.*
+data/metadata
+data/processed
+data/monitoring
+data/screenshots
+models
+mlruns
+reports
+MLOps_Proposal.pdf

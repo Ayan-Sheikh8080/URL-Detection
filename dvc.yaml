@@ -1,0 +1,27 @@
+stages:
+  prepare:
+    cmd: python -m src.data.prepare --strict
+    deps:
+      - data/raw/PhiUSIIL_Phishing_URL_Dataset.csv
+      - src/agent/features.py
+      - src/data/prepare.py
+      - src/ml/features.py
+    outs:
+      - data/processed/urls_processed.csv
+      - data/metadata/dataset_meta.json
+  train:
+    cmd: python -m src.training.train
+    deps:
+      - data/processed/urls_processed.csv
+      - src/training/train.py
+      - src/agent/features.py
+      - src/agent/checks.py
+      - src/agent/reasoning.py
+      - src/ml/features.py
+    outs:
+      - models/model_bundle.joblib
+      - models/index.json
+      - models/reference_features.csv
+    metrics:
+      - reports/evaluation.json:
+          cache: false

@@ -1,25 +1,31 @@
-.PHONY: help setup install train test docker-build docker-push e2e-test lint
+.PHONY: help setup install prepare train test docker-build docker-push e2e-test lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "} {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 setup: ## Install dependencies
 	@npm install
-	@python3 -m pip install -r requirements-dev.txt
+	@PYYAML_FORCE_LIBYAML=0 python -m pip install -r requirements.txt
+	@python -m playwright install chromium
 
-install: ## Alias for setup
+install: setup ## Alias for setup
+
+prepare: ## Validate and prepare the training data
+	@python -m src.data.prepare --strict
 
 train: ## Train ML models
-	@python3 -m src.training.train
+	@python -m src.training.train
 
 test: ## Run unit tests
 	@npm test
+	@python -m pytest -q
 
 e2e-test: ## Run end-to-end tests
-	@npm run test:e2e
+	@python -m pytest -q tests/python/test_api.py
 
 lint: ## Run linter
 	@npm run lint
+	@python -m compileall -q src tests
 
 docker-build: ## Build Docker images
 	@docker build -f Dockerfile.api -t phishing-api:latest .
