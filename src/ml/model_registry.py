@@ -1,241 +1,172 @@
-"""Model registry: loads trained models and produces scores + top factors.
-
-Models are stored as joblib artifacts next to an ``index.json`` written by the
-training stage. MLflow holds the experiment history; the registry only needs the
-promoted artifacts, which keeps serving fast and offline-capable.
-
-Local explanations use SHAP for tree ensembles and exact coefficient x value
-contributions for linear models.  If SHAP cannot explain an estimator, the
-registry falls back to impurity importance x value and labels the method
-accordingly.
-"""
-
-from __future__ import annotations
-
+import os
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
 import joblib
 import numpy as np
-import pandas as pd
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+import mlflow
 
-CONFIGS = ("url_only", "content_only", "combined")
-
-
-class ModelNotFoundError(RuntimeError):
-    """Raised when no promoted model artifact is available."""
-
-
-@dataclass
-class LoadedModel:
-    """A promoted model plus everything needed to score a raw feature dict."""
-
-    name: str
-    config: str
-    feature_columns: list[str]
-    model: Any
-    metrics: dict[str, float] = field(default_factory=dict)
-
-    _explainer: Any = field(default=None, repr=False, compare=False)
-
-    def predict_proba(self, features: dict[str, float]) -> float:
-        row = pd.DataFrame(
-            [{col: float(features.get(col, 0.0)) for col in self.feature_columns}],
-            columns=self.feature_columns,
-            dtype=float,
-        )
-        proba = self.model.predict_proba(row)
-        return float(proba[0][1])
-
-    def top_factors(
-        self, features: dict[str, float], k: int = 5
-    ) -> list[dict[str, Any]]:
-        """Return the strongest feature contributions toward phishing risk."""
-        original = np.array(
-            [float(features.get(c, 0.0)) for c in self.feature_columns],
-            dtype=float,
-        )
-        estimator = self.model
-        scaled = original.copy()
-
-        if hasattr(estimator, "named_steps"):
-            scaler = estimator.named_steps.get("scaler")
-            if scaler is not None and hasattr(scaler, "mean_"):
-                scale = np.where(scaler.scale_ == 0, 1.0, scaler.scale_)
-                scaled = (original - scaler.mean_) / scale
-            estimator = list(estimator.named_steps.values())[-1]
-
-        contributions: np.ndarray | None = None
-        method = "importance"
-
-        if hasattr(estimator, "coef_"):
-            weights = np.ravel(estimator.coef_)
-            contributions = weights * scaled
-            method = "linear"
-
-        if contributions is None:
-            contributions = self._shap_contributions(estimator, scaled)
-            if contributions is not None:
-                method = "shap"
-
-        if contributions is None:
-            if hasattr(estimator, "feature_importances_"):
-                importances = np.asarray(estimator.feature_importances_, dtype=float)
-                contributions = importances * np.sign(scaled)
-            else:
-                return []
-
-        order = np.argsort(-np.abs(contributions))[:k]
-        factors = []
-
-        for i in order:
-            contribution = float(contributions[i])
-            factors.append(
-                {
-                    "feature": self.feature_columns[i],
-                    "value": round(float(original[i]), 4),
-                    "contribution": round(contribution, 6),
-                    "direction": (
-                        "increases_risk"
-                        if contribution > 0
-                        else "decreases_risk"
-                        if contribution < 0
-                        else "neutral"
-                    ),
-                    "method": method,
-                }
-            )
-
-        return factors
-
-    def _shap_contributions(
-        self, estimator: Any, scaled: np.ndarray
-    ) -> np.ndarray | None:
-        try:
-            import shap
-
-            if self._explainer is None:
-                self._explainer = shap.TreeExplainer(estimator)
-            raw = self._explainer.shap_values(scaled.reshape(1, -1))
-        except Exception:  # noqa: BLE001
-            return None
-
-        if isinstance(raw, list):
-            raw = raw[-1] if len(raw) > 1 else raw[0]
-
-        array = np.asarray(raw, dtype=float)
-        if array.ndim == 3:
-            array = (
-                array[0, :, -1]
-                if array.shape[0] == 1
-                else array[:, :, -1].mean(axis=0)
-            )
-        elif array.ndim == 2:
-            array = array[0] if array.shape[0] == 1 else array.mean(axis=0)
-
-        if array.ndim != 1 or len(array) != len(self.feature_columns):
-            return None
-
-        return array
-
-
-    def _shap_contributions(self, estimator, scaled: np.ndarray) -> np.ndarray | None:
-        try:
-            import shap
-
-            if self._explainer is None:
-                self._explainer = shap.TreeExplainer(estimator)
-            raw = self._explainer.shap_values(scaled.reshape(1, -1))
-        except Exception:  # noqa: BLE001 - explanation must never break serving
-            return None
-
-        # Different SHAP/Sklearn versions return (n, f), (n, f, classes), or
-        # [class0, class1] lists.  Normalise to one contribution per feature.
-        if isinstance(raw, list):
-            if len(raw) > 1:
-                raw = raw[-1]
-            else:
-                raw = raw[0]
-        array = np.asarray(raw, dtype=float)
-        if array.ndim == 3:
-            array = array[0, :, -1] if array.shape[0] == 1 else array[:, :, -1].mean(axis=0)
-        elif array.ndim == 2:
-            array = array[0] if array.shape[0] == 1 else array.mean(axis=0)
-        if array.ndim != 1 or len(array) != len(self.feature_columns):
-            return None
-        return array
+MODELS_DIR = Path("models")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 
 
 class ModelRegistry:
-    def __init__(self, model_dir: str | Path):
-        self.model_dir = Path(model_dir)
-        self._index: dict[str, Any] = {}
-        self._index_loaded = False
-        self._cache: dict[str, LoadedModel | None] = {}
-
-    # ------------------------------------------------------------------ #
-    def index(self) -> dict[str, Any]:
-        if not self._index_loaded:
-            path = self.model_dir / "index.json"
-            if path.exists():
-                try:
-                    self._index = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    self._index = {}
-            self._index_loaded = True
-        return self._index
-
-    def available_configs(self) -> list[str]:
-        return sorted(self.index().get("models", {}).keys())
-
-    def load(self, config: str = "url_only") -> LoadedModel | None:
-        """Load a promoted model for a config, or None when unavailable."""
-        if config in self._cache:
-            return self._cache[config]
-
-        entry = self.index().get("models", {}).get(config)
-        if not entry:
-            self._cache[config] = None
+    """Manages model versioning, promotion, and scoring."""
+    
+    def __init__(self, models_dir: Path = MODELS_DIR, tracking_uri: str = MLFLOW_TRACKING_URI):
+        self.models_dir = models_dir
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        mlflow.set_tracking_uri(tracking_uri)
+        self.promoted_models: Dict[str, Any] = {}
+        self.reference_features: Optional[np.ndarray] = None
+        self.feature_schema: Optional[Dict] = None
+        
+    def load_promoted_model(self, config: str = "combined") -> Optional[Any]:
+        """Load the promoted model for a given configuration."""
+        model_path = self.models_dir / f"{config}_model.pkl"
+        index_path = self.models_dir / "index.json"
+        
+        if not model_path.exists():
+            print(f"Model not found at {model_path}")
             return None
-
-        artifact = self.model_dir / entry["artifact"]
-        if not artifact.exists():
-            self._cache[config] = None
-            return None
-
+        
+        # Load model
+        model = joblib.load(model_path)
+        
+        # Load index if exists
+        if index_path.exists():
+            with open(index_path, 'r') as f:
+                index = json.load(f)
+            print(f"Loaded promoted model: {config} - {index.get('model_type', 'unknown')}")
+            self.promoted_models[config] = model
+            self.feature_schema = index.get('feature_schema', {})
+            return model
+        
+        self.promoted_models[config] = model
+        return model
+    
+    def promote_model(self, model: Any, config: str, feature_schema: Dict, 
+                      metrics: Dict[str, float]) -> None:
+        """Promote a model to the models directory."""
+        model_path = self.models_dir / f"{config}_model.pkl"
+        index_path = self.models_dir / "index.json"
+        
+        # Save model
+        joblib.dump(model, model_path)
+        
+        # Create index
+        index = {
+            "version": "1.0.0",
+            "config": config,
+            "model_type": type(model).__name__,
+            "feature_schema": feature_schema,
+            "metrics": metrics,
+            "promoted_at": json.loads(os.popen('date').read()) if hasattr(os.popen('date').read(), '__iter__') else str(__import__('datetime').datetime.utcnow())
+        }
+        
+        with open(index_path, 'w') as f:
+            json.dump(index, f, indent=2)
+        
+        # Log to MLflow
+        with mlflow.start_run():
+            mlflow.log_param("config", config)
+            mlflow.log_param("model_type", type(model).__name__)
+            for metric_name, metric_value in metrics.items():
+                mlflow.log_metric(metric_name, metric_value)
+        
+        self.promoted_models[config] = model
+        self.feature_schema = feature_schema
+        print(f"Model promoted: {config} model saved to {model_path}")
+    
+    def score(self, model_name: str, features: Dict[str, float]) -> float:
+        """Get a prediction score from a model."""
+        model = self.promoted_models.get(model_name)
+        if model is None:
+            print(f"Model {model_name} not found in promoted models")
+            return 0.5  # Default neutral score
+        
         try:
-            loaded = LoadedModel(
-                name=entry.get("model_name", "unknown"),
-                config=config,
-                feature_columns=list(entry["feature_columns"]),
-                model=joblib.load(artifact),
-                metrics=dict(entry.get("metrics", {})),
-            )
-        except Exception:  # noqa: BLE001 - a corrupt artifact is missing evidence
-            loaded = None
-        self._cache[config] = loaded
-        return loaded
+            # Convert features to array
+            feature_array = self._features_to_array(features)
+            prediction = model.predict_proba([feature_array])[0]
+            # Return probability of phishing class (assuming binary classification)
+            if len(prediction) >= 2:
+                return float(prediction[1])  # Probability of positive class (phishing)
+            return float(prediction[0])
+        except Exception as e:
+            print(f"Error scoring model: {e}")
+            return 0.5
+    
+    def _features_to_array(self, features: Dict[str, float]) -> List[float]:
+        """Convert feature dict to array based on schema."""
+        if self.feature_schema is None:
+            # Default: return values in alphabetical order of keys
+            return [features.get(k, 0.0) for k in sorted(features.keys())]
+        
+        # Use schema to order features
+        array = []
+        for feature_name in self.feature_schema.get('feature_order', sorted(features.keys())):
+            array.append(features.get(feature_name, 0.0))
+        
+        # Pad or trim to expected length
+        expected_len = self.feature_schema.get('expected_length', len(array))
+        if len(array) < expected_len:
+            array.extend([0.0] * (expected_len - len(array)))
+        elif len(array) > expected_len:
+            array = array[:expected_len]
+        
+        return array
+    
+    def reference_features_available(self) -> bool:
+        """Check if reference features for drift monitoring are available."""
+        return self.reference_features is not None
+    
+    def set_reference_features(self, features_df: np.ndarray) -> None:
+        """Set reference features for drift detection."""
+        self.reference_features = features_df
+    
+    def get_reference_features(self) -> Optional[np.ndarray]:
+        """Get reference features."""
+        return self.reference_features
 
-    def load_best(self) -> LoadedModel | None:
-        """Load the overall best model, preferring the URL model for scoring.
 
-        The URL model has no dependency on a live browser visit, so the agent
-        always has at least one usable signal.
-        """
-        for config in ("url_only", "combined", "content_only"):
-            model = self.load(config)
-            if model is not None:
-                return model
-        return None
+def load_best_model(config: str = "combined") -> Any:
+    """Convenience function to load the best model for a configuration."""
+    registry = ModelRegistry()
+    return registry.load_promoted_model(config)
 
-    def reference_features(self) -> pd.DataFrame | None:
-        """Reference feature distribution captured at training time (for drift)."""
-        path = self.model_dir / "reference_features.csv"
-        if not path.exists():
-            return None
-        try:
-            return pd.read_csv(path)
-        except Exception:  # noqa: BLE001
-            return None
+
+def score_url(url: str, model_name: str = "combined") -> Dict[str, Any]:
+    """Score a URL using the model registry."""
+    from src.models.url_features import extractUrlFeatures, predictUrl
+    
+    # Extract features
+    features = extractUrlFeatures(url)
+    if features is None:
+        return {"score": 0.5, "verdict": "unknown", "error": "Feature extraction failed"}
+    
+    # Get prediction from Python model
+    prediction = predictUrl(features)
+    
+    # Also try registry if available
+    registry = ModelRegistry()
+    registry_score = registry.score(model_name, features)
+    
+    # Combine scores (weighted average)
+    combined_score = 0.7 * prediction.get("score", 0.5) + 0.3 * registry_score
+    
+    # Determine verdict
+    score = combined_score
+    if score >= 0.7:
+        verdict = "phishing"
+    elif score >= 0.3:
+        verdict = "suspicious"
+    else:
+        verdict = "safe"
+    
+    return {
+        "score": round(combined_score, 4),
+        "verdict": verdict,
+        "model_score": prediction.get("score", 0.5),
+        "registry_score": round(registry_score, 4)
+    }

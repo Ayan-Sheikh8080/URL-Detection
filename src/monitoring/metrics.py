@@ -1,181 +1,157 @@
-"""Custom monitoring metrics (proposal feature 10).
-
-Every analysis appends one JSON line to ``events.jsonl``. The API exposes
-aggregated verdict statistics, latency percentiles, browser timeout/error rates
-and mean scores, which is exactly what the proposal asks to monitor.
-"""
-
-from __future__ import annotations
-
 import json
-import math
 import time
-from collections import Counter
+from datetime import datetime, timedelta
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
-from src.config import PROJECT_ROOT
+# Path for monitoring events
+MONITORING_EVENTS_PATH = Path("data/monitoring/events.jsonl")
 
-_TIMEOUT_MARKERS = ("timeout", "timed out")
-
-
-class MetricsStore:
-    def __init__(self, events_path: str | Path | None = None):
-        self.events_path = Path(
-            events_path or PROJECT_ROOT / "data" / "monitoring" / "events.jsonl"
-        )
-
-    # ------------------------------------------------------------------ #
-    def record(
-        self,
-        *,
-        url: str,
-        verdict: str,
-        confidence: float,
-        model_score: float | None,
-        browser_ok: bool,
-        latency_ms: float,
-        features: dict | None = None,
-        reasons: list[str] | None = None,
-        browser_error: str | None = None,
-    ) -> None:
-        error = str(browser_error)[:300] if browser_error else None
-        event = {
-            "ts": time.time(),
-            "url": url,
-            "verdict": verdict,
-            "confidence": _finite(confidence),
-            "model_score": _finite(model_score),
-            "browser_ok": bool(browser_ok),
-            "browser_error": error,
-            "browser_timed_out": bool(error and _is_timeout(error)),
-            "latency_ms": _finite(latency_ms) or 0.0,
-            "features": _finite_mapping(features or {}),
-            "reasons": [str(item)[:200] for item in (reasons or [])[:3]],
-        }
+class MonitoringMetrics:
+    """Collects and tracks monitoring metrics for the phishing URL analyzer."""
+    
+    def __init__(self, events_path: Path = MONITORING_EVENTS_PATH):
+        self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.events_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, allow_nan=False) + "\n")
-
-    # ------------------------------------------------------------------ #
-    def events(self, limit: int | None = None) -> list[dict]:
-        if not self.events_path.exists():
-            return []
-        rows: list[dict] = []
-        for line in self.events_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        
+        # In-memory counters
+        self.total_analyses = 0
+        self.verdict_distribution = {"safe": 0, "suspicious": 0, "phishing": 0}
+        self.latency_samples = []
+        self.model_scores = []
+        self.browser_failures = 0
+        self.start_time = time.time()
+        
+        # Load existing events if any
+        self._load_events()
+    
+    def _load_events(self):
+        """Load existing monitoring events from file."""
+        if self.events_path.exists():
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-        if limit is not None:
-            rows = rows[-max(int(limit), 1):]
-        return rows
-
-    def summary(self, window: int = 1000) -> dict:
-        window = max(int(window), 1)
-        events = self.events(limit=window)
-        if not events:
+                with open(self.events_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                event = json.loads(line)
+                                self.total_analyses = max(self.total_analyses, event.get('analysis_id', 0))
+                                if 'verdict' in event:
+                                    v = event['verdict']
+                                    if v in self.verdict_distribution:
+                                        self.verdict_distribution[v] += 1
+                                if 'latency_ms' in event:
+                                    self.latency_samples.append(event['latency_ms'])
+                                if 'model_score' in event:
+                                    self.model_scores.append(event['model_score'])
+                                if event.get('browser_ok', True) == False:
+                                    self.browser_failures += 1
+                            except json.JSONDecodeError:
+                                continue
+            except Exception as e:
+                print(f"Error loading events: {e}")
+    
+    def record_analysis(self, analysis_data: Dict[str, Any]):
+        """Record a completed analysis event."""
+        try:
+            # Add timestamp
+            analysis_data['timestamp'] = datetime.utcnow().isoformat() + "Z"
+            analysis_data['analysis_id'] = self.total_analyses + 1
+            
+            # Append to events file
+            with open(self.events_path, 'a') as f:
+                f.write(json.dumps(analysis_data) + "\n")
+            
+            # Update in-memory counters
+            self.total_analyses += 1
+            
+            # Update verdict distribution
+            verdict = analysis_data.get('verdict', 'safe')
+            if verdict in self.verdict_distribution:
+                self.verdict_distribution[verdict] += 1
+            
+            # Update latency
+            latency = analysis_data.get('load_ms', 0)
+            self.latency_samples.append(latency)
+            
+            # Keep only last 1000 samples
+            if len(self.latency_samples) > 1000:
+                self.latency_samples = self.latency_samples[-1000:]
+            
+            # Update model score
+            model_score = analysis_data.get('model_score', 0) or 0
+            self.model_scores.append(model_score)
+            
+            # Update browser failures
+            browser_ok = analysis_data.get('browser_ok', True)
+            if browser_ok == False:
+                self.browser_failures += 1
+        
+        except Exception as e:
+            print(f"Error recording analysis: {e}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current monitoring statistics."""
+        # Calculate percentiles
+        sorted_latencies = sorted(self.latency_samples)
+        n = len(sorted_latencies)
+        
+        if n == 0:
             return {
                 "total_analyses": 0,
-                "window": window,
-                "verdicts": {},
-                "verdict_share": {},
-                "latency_ms": {},
-                "browser": {},
-                "confidence_mean": None,
-                "model_score_mean": None,
+                "verdict_distribution": {"safe": 0, "suspicious": 0, "phishing": 0},
+                "average_latency_ms": 0,
+                "p50_latency_ms": 0,
+                "p95_latency_ms": 0,
+                "max_latency_ms": 0,
+                "average_model_score": 0,
+                "browser_failure_rate": 0,
+                "uptime_seconds": round(time.time() - self.start_time, 2)
             }
-
-        verdicts = Counter(str(e.get("verdict", "unknown")) for e in events)
-        latencies = sorted(
-            value
-            for value in (_finite(e.get("latency_ms")) for e in events)
-            if value is not None
-        )
-        failures = [e for e in events if not e.get("browser_ok")]
-        timeouts = [e for e in failures if e.get("browser_timed_out")]
-        errors = [e for e in failures if not e.get("browser_timed_out")]
-        model_scores = [
-            value
-            for value in (_finite(e.get("model_score")) for e in events)
-            if value is not None
-        ]
-        confidences = [
-            value
-            for value in (_finite(e.get("confidence")) for e in events)
-            if value is not None
-        ]
-        error_reasons = Counter(
-            str(e.get("browser_error"))[:160]
-            for e in failures
-            if e.get("browser_error")
-        )
-
+        
+        p50_idx = int(n * 0.5)
+        p95_idx = int(n * 0.95)
+        
+        avg_latency = sum(sorted_latencies) / n
+        
+        # Calculate average model score
+        avg_model_score = sum(self.model_scores) / len(self.model_scores) if self.model_scores else 0
+        
+        # Browser failure rate
+        browser_failure_rate = (self.browser_failures / self.total_analyses * 100) if self.total_analyses > 0 else 0
+        
         return {
-            "total_analyses": len(events),
-            "window": window,
-            "verdicts": dict(verdicts),
-            "verdict_share": {k: round(v / len(events), 4) for k, v in verdicts.items()},
-            "latency_ms": _latency_stats(latencies),
-            "browser": {
-                "failures": len(failures),
-                "failure_rate": round(len(failures) / len(events), 4),
-                "timeouts": len(timeouts),
-                "timeout_rate": round(len(timeouts) / len(events), 4),
-                "errors": len(errors),
-                "error_rate": round(len(errors) / len(events), 4),
-                "top_error_reasons": dict(error_reasons.most_common(5)),
-            },
-            "confidence_mean": _mean(confidences),
-            "model_score_mean": _mean(model_scores),
+            "total_analyses": self.total_analyses,
+            "verdict_distribution": dict(self.verdict_distribution),
+            "average_latency_ms": round(avg_latency, 2),
+            "p50_latency_ms": round(float(sorted_latencies[p50_idx]) if p50_idx < n else 0, 2),
+            "p95_latency_ms": round(float(sorted_latencies[p95_idx]) if p95_idx < n else 0, 2),
+            "max_latency_ms": round(max(sorted_latencies), 2),
+            "average_model_score": round(avg_model_score, 4),
+            "browser_failure_rate": round(browser_failure_rate, 2),
+            "uptime_seconds": round(time.time() - self.start_time, 2)
         }
+    
+    def record_event(self, event_type: str, data: Dict[str, Any]):
+        """Record a generic monitoring event."""
+        try:
+            event = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "event_type": event_type,
+                **data
+            }
+            self.record_analysis(event)
+        except Exception as e:
+            print(f"Error recording event: {e}")
 
 
-def _finite(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+def get_monitoring_stats() -> Dict[str, Any]:
+    """Convenience function to get current monitoring statistics."""
+    metrics = MonitoringMetrics()
+    return metrics.get_stats()
 
 
-def _finite_mapping(values: dict) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for key, value in values.items():
-        number = _finite(value)
-        if number is not None:
-            out[str(key)] = number
-    return out
-
-
-def _mean(values: list[float]) -> float | None:
-    return round(sum(values) / len(values), 4) if values else None
-
-
-def _is_timeout(message: str) -> bool:
-    lowered = message.lower()
-    return any(marker in lowered for marker in _TIMEOUT_MARKERS)
-
-
-def _latency_stats(sorted_values: list[float]) -> dict:
-    if not sorted_values:
-        return {"mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
-    return {
-        "mean": round(sum(sorted_values) / len(sorted_values), 2),
-        "p50": _percentile(sorted_values, 50),
-        "p95": _percentile(sorted_values, 95),
-        "p99": _percentile(sorted_values, 99),
-        "max": round(sorted_values[-1], 2),
-    }
-
-
-def _percentile(sorted_values: list[float], pct: int) -> float:
-    if not sorted_values:
-        return 0.0
-    index = min(int(round((pct / 100) * (len(sorted_values) - 1))), len(sorted_values) - 1)
-    return round(sorted_values[index], 2)
+def record_analysis_event(analysis_data: Dict[str, Any]):
+    """Convenience function to record an analysis event."""
+    metrics = MonitoringMetrics()
+    metrics.record_analysis(analysis_data)

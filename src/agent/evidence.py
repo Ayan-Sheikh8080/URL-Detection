@@ -1,70 +1,55 @@
-"""Structured evidence collected from a sandboxed page visit."""
-
-from __future__ import annotations
-
-from dataclasses import asdict, dataclass, field
-from typing import Any
-
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 @dataclass
-class FormEvidence:
+class FormElement:
+    """Represents a form element found on a page."""
     action: str = ""
-    method: str = "get"
-    has_password: bool = False
-    input_names: list[str] = field(default_factory=list)
-    submits_cross_domain: bool = False
-
+    method: str = "GET"
+    inputs: List[Dict[str, Any]] = field(default_factory=list)
+    action_domain: str = ""  # Domain form submits to
 
 @dataclass
-class Evidence:
-    """Everything the sandboxed browser observed about a link."""
+class IframeElement:
+    """Represents an iframe element found on a page."""
+    src: str = ""
+    name: str = ""
+    sandbox: str = ""
 
-    requested_url: str = ""
-    final_url: str = ""
-    redirect_chain: list[str] = field(default_factory=list)
-    status_code: int | None = None
+@dataclass
+class CertificateInfo:
+    """TLS certificate information."""
+    is_valid: bool = False
+    issuer: str = ""
+    subject: str = ""
+    fingerprint: str = ""
+    expiration_date: str = ""
+
+@dataclass
+class EvidenceSummary:
+    """Collected evidence from browser sandbox."""
+    redirect_chain: List[str] = field(default_factory=list)
+    final_domain: str = ""
+    forms: List[FormElement] = field(default_factory=list)
+    iframes: List[IframeElement] = field(default_factory=list)
+    page_text: str = ""
     title: str = ""
-    text_sample: str = ""
-    forms: list[FormEvidence] = field(default_factory=list)
-    iframes: list[str] = field(default_factory=list)
-    has_password_field: bool = False
-    external_script_count: int = 0
-    num_hidden_inputs: int = 0
-    screenshot_path: str = ""
+    certificate: CertificateInfo = field(default_factory=CertificateInfo)
+    forms_submitting_to_different_domain: int = 0
+    password_fields: int = 0
+    external_submission_forms: int = 0
+
+@dataclass 
+class AnalysisResult:
+    """Final analysis result with verdict and reasons."""
+    verdict: str = "safe"  # safe, suspicious, phishing
+    confidence: float = 0.0
+    reasons: List[str] = field(default_factory=list)
+    model_score: float = 0.0
+    combined_score: float = 0.0
+    top_factors: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_summary: EvidenceSummary = field(default_factory=EvidenceSummary)
+    browser_ok: bool = True
     load_ms: float = 0.0
-    cert: dict[str, Any] = field(default_factory=dict)
-    domain_checks: dict[str, Any] = field(default_factory=dict)
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        return data
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Evidence:
-        forms = [FormEvidence(**f) for f in data.get("forms") or []]
-        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        known["forms"] = forms
-        return cls(**known)
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and bool(self.final_url)
-
-
-def summarize(evidence: Evidence | dict) -> dict[str, Any]:
-    """Compact evidence summary embedded in API responses and LLM prompts."""
-    data = evidence.to_dict() if isinstance(evidence, Evidence) else dict(evidence)
-    forms = data.get("forms") or []
-    return {
-        "final_url": data.get("final_url", ""),
-        "redirect_count": max(len(data.get("redirect_chain") or []) - 1, 0),
-        "status_code": data.get("status_code"),
-        "title": (data.get("title") or "")[:200],
-        "form_count": len(forms),
-        "has_password_field": bool(data.get("has_password_field")),
-        "cross_domain_form": any(f.get("submits_cross_domain") for f in forms),
-        "iframe_count": len(data.get("iframes") or []),
-        "cert_days_to_expiry": (data.get("cert") or {}).get("days_to_expiry"),
-        "browser_error": data.get("error"),
-    }
+    reasoner: str = "rule_based"

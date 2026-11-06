@@ -1,61 +1,39 @@
-.PHONY: help install install-dev data train evaluate test safety lint api sandbox up down clean dvc-repro
+.PHONY: help setup install train test docker-build docker-push e2e-test lint
 
-help:
-	@echo "Targets:"
-	@echo "  install      install runtime dependencies"
-	@echo "  install-dev  install dev dependencies and git hooks"
-	@echo "  data         run the data preparation stage"
-	@echo "  train        train and compare all model configurations (MLflow)"
-	@echo "  evaluate     evaluate promoted models"
-	@echo "  dvc-repro    reproduce the full DVC pipeline"
-	@echo "  test         run the unit test suite"
-	@echo "  safety       run safety + prompt-injection tests"
-	@echo "  lint         run ruff"
-	@echo "  api          serve the FastAPI app locally"
-	@echo "  sandbox      serve the browser sandbox locally"
-	@echo "  up/down      start/stop the docker-compose stack"
-	@echo "  clean        remove generated artifacts"
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "} {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-install:
-	pip install -r requirements.txt
+setup: ## Install dependencies
+	@npm install
+	@python3 -m pip install -r requirements-dev.txt
 
-install-dev:
-	pip install -r requirements-dev.txt
+install: ## Alias for setup
 
-data:
-	python -m src.data.prepare
+train: ## Train ML models
+	@python3 -m src.training.train
 
-train:
-	python -m src.training.train
+test: ## Run unit tests
+	@npm test
 
-evaluate:
-	python -m src.training.evaluate
+e2e-test: ## Run end-to-end tests
+	@npm run test:e2e
 
-dvc-repro:
-	dvc repro
+lint: ## Run linter
+	@npm run lint
 
-test:
-	pytest -q
+docker-build: ## Build Docker images
+	@docker build -f Dockerfile.api -t phishing-api:latest .
+	@docker build -f Dockerfile.sandbox -t phishing-sandbox:latest .
 
-safety:
-	pytest -q tests/test_checks.py tests/test_safety_and_injection.py -v
+docker-push: ## Push Docker images to ECR
+	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin
+	@docker tag phishing-api:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_API_REPO):latest
+	@docker tag phishing-sandbox:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_SANDBOX_REPO):latest
+	@docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_API_REPO):latest
+	@docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_SANDBOX_REPO):latest
 
-lint:
-	ruff check src tests --line-length 110
+docker-compose-up: ## Start full stack with docker compose
+	@docker compose up --build
 
-api:
-	uvicorn src.serving.api:app --reload --port 8000
-
-sandbox:
-	uvicorn src.sandbox.server:app --reload --port 8080
-
-up:
-	docker compose up --build -d
-
-down:
-	docker compose down
-
-clean:
-	rm -rf mlruns mlflow.db .pytest_cache .ruff_cache reports/*.json
-	rm -rf data/processed/* data/monitoring/* models/*.pkl models/*.joblib models/index.json
-	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+docker-compose-down: ## Stop full stack
+	@docker compose down

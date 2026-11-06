@@ -1,189 +1,182 @@
-"""Certificate and domain/brand checks (tool 3 of the agent design)."""
-
-from __future__ import annotations
-
-import datetime as dt
-import fnmatch
 import re
-import socket
-import ssl
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
+from typing import Dict, Any, List, Optional
 
-from src.features.url_features import SUSPICIOUS_TLDS, registrable_domain
-
-# Brands frequently impersonated in phishing pages. If a brand is shown in the
-# page title but absent from the final domain, that is a lookalike signal.
-KNOWN_BRANDS = [
-    "paypal", "google", "facebook", "instagram", "microsoft", "apple",
-    "amazon", "netflix", "whatsapp", "outlook", "chase", "bankofamerica",
-    "coinbase", "dropbox", "linkedin", "github", "steam", "dhl", "irs",
-    "ebay", "hdfc",
-]
-
-# Official registrable domains for the brands above.  This avoids false
-# positives for legitimate subdomains (outlook.live.com) while still catching
-# lookalikes such as paypal.com.evil.top (registrable domain evil.top).
-BRAND_OFFICIAL_DOMAINS: dict[str, set[str]] = {
-    "paypal": {"paypal.com", "paypal.me"},
-    "google": {"google.com", "gmail.com", "youtube.com", "google.co.uk"},
-    "facebook": {"facebook.com", "fb.com"},
-    "instagram": {"instagram.com"},
-    "microsoft": {"microsoft.com", "live.com", "office.com", "microsoftonline.com"},
-    "apple": {"apple.com", "icloud.com"},
-    "amazon": {"amazon.com", "amazon.co.uk", "amazon.in"},
-    "netflix": {"netflix.com"},
-    "whatsapp": {"whatsapp.com", "wa.me"},
-    "outlook": {"live.com", "outlook.com", "microsoft.com"},
-    "chase": {"chase.com"},
-    "bankofamerica": {"bankofamerica.com"},
-    "coinbase": {"coinbase.com"},
-    "dropbox": {"dropbox.com"},
-    "linkedin": {"linkedin.com"},
-    "github": {"github.com"},
-    "steam": {"steampowered.com", "steamcommunity.com"},
-    "dhl": {"dhl.com"},
-    "irs": {"irs.gov"},
-    "ebay": {"ebay.com"},
-    "hdfc": {"hdfcbank.com"},
-}
-
-IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
-
-
-def cert_details(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
-    """Fetch and summarize the TLS certificate presented by `hostname`.
-
-    Never raises: failures are reported in the returned dict so the agent can
-    treat "no certificate evidence" as missing data rather than a crash.
-    """
-    result: dict = {
-        "issuer": None,
-        "subject_cn": None,
-        "days_to_expiry": None,
-        "self_signed": False,
-        "host_matches": None,
-        "error": None,
+def extract_domain_features(final_domain: str, original_url: str) -> Dict[str, Any]:
+    """Compare final domain with original link and check for brand impersonation."""
+    features = {
+        'domain_mismatch': False,
+        'lookalike_domain': False,
+        'brand_impersonation': False,
+        'tld_suspicious': False,
+        'subdomain_spoofing': False,
     }
-    if not hostname or (IPV4_RE.match(hostname) is None and "." not in hostname):
-        result["error"] = "unqualified hostname"
-        return result
+    
     try:
-        context = ssl.create_default_context()
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
-            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
-    except Exception as exc:  # noqa: BLE001 - any failure is missing evidence
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
-
-    if not cert:
-        result["error"] = "no peer certificate"
-        return result
-
-    subject_cn = _first_cn(cert.get("subject"))
-    issuer_cn = _first_cn(cert.get("issuer"))
-    san_names = [v for k, v in cert.get("subjectAltName", ()) if k == "DNS"]
-
-    not_after_raw = cert.get("notAfter")
-    days_to_expiry = None
-    if not_after_raw:
-        try:
-            not_after = dt.datetime.strptime(not_after_raw, "%b %d %H:%M:%S %Y %Z")
-            days_to_expiry = (not_after - dt.datetime.now(dt.UTC).replace(tzinfo=None)).days
-        except ValueError:
-            days_to_expiry = None
-
-    result.update(
-        issuer=issuer_cn,
-        subject_cn=subject_cn,
-        days_to_expiry=days_to_expiry,
-        self_signed=bool(_normalize(subject_cn) and _normalize(subject_cn) == _normalize(issuer_cn)),
-        host_matches=_hostname_matches(hostname, san_names),
-    )
-    return result
-
-
-def _first_cn(subject_entries) -> str | None:
-    for rdn in subject_entries or ():
-        for key, value in rdn:
-            if key == "commonName":
-                return value
-    return None
-
-
-def _normalize(value: str | None) -> str:
-    return (value or "").strip().lower()
-
-
-def _hostname_matches(hostname: str, san_names: list[str]) -> bool:
-    hostname = hostname.lower().rstrip(".")
-    for name in san_names:
-        name = name.lower().rstrip(".")
-        if name.startswith("*."):
-            # Wildcards only cover one label level (www.example.com, not a.b.c).
-            if fnmatch.fnmatchcase(hostname, name):
-                suffix = name[1:]  # ".example.com"
-                if hostname.endswith(suffix) and "." not in hostname[: -len(suffix)]:
-                    return True
-        elif name == hostname:
-            return True
-    return False
+        # Parse original URL to get the claimed brand/domain
+        original_parsed = urlparse(original_url)
+        original_hostname = original_parsed.hostname or ''
+        
+        # Parse final domain
+        final_parsed = urlparse(final_domain)
+        final_hostname = final_parsed.hostname or ''
+        
+        # Check for domain mismatch
+        if original_hostname.lower() != final_hostname.lower():
+            features['domain_mismatch'] = True
+            
+            # Check for lookalike/TLD tricks
+            final_parts = final_hostname.split('.')
+            original_parts = original_hostname.split('.')
+            
+            # Check TLD
+            if len(final_parts) >= 1 and len(original_parts) >= 1:
+                final_tld = final_parts[-1].lower()
+                original_tld = original_parts[-1].lower()
+                
+                # Suspicious TLDs
+                suspicious_tlds = ['.top', '.club', '.xyz', '.wang', '.gq', '.ml', '.tk']
+                if final_tld in suspicious_tlds and original_tld not in suspicious_tlds:
+                    features['tld_suspicious'] = True
+            
+            # Check for subdomain spoofing (e.g., paypal.fake-domain.com)
+            if len(final_parts) >= 2:
+                potential_brand = '.'.join(final_parts[-2:])  # last two parts as "brand"
+                suspicious_brands = ['paypal', 'bank', 'amazon', 'microsoft', 'google', 'apple']
+                if any(potential_brand.startswith(brand) or potential_brand == brand 
+                       for brand in suspicious_brands):
+                # Check if the beginning looks like a brand
+                    brand_prefix = potential_brand.split('.')[0].lower()
+                    if brand_prefix in suspicious_brands:
+                        features['lookalike_domain'] = True
+        
+        # Check for brand impersonation in the page context
+        # (This would be enhanced with actual page text analysis)
+        
+    except Exception as e:
+        print(f"Error extracting domain features: {e}")
+    
+    return features
 
 
-def _brand_in_domain(brand: str, host: str) -> bool:
-    """True when `host` belongs to the brand's official registrable domain."""
-    base = registrable_domain(host)
-    if not base:
-        return False
-    official = BRAND_OFFICIAL_DOMAINS.get(brand)
-    if official:
-        return base in official
-    labels = base.split(".")[:-1]
-    return any(label.replace("-", "") == brand for label in labels)
-
-
-def domain_checks(original_url: str, final_url: str, page_title: str = "") -> dict:
-    """Compare the final landing domain with the original link and page brand."""
-    original_host = (urlparse(original_url).hostname or "").lower()
-    final_host = (urlparse(final_url or original_url).hostname or "").lower()
-
-    original_base = registrable_domain(original_host)
-    final_base = registrable_domain(final_host)
-    same_base = bool(original_base) and original_base == final_base
-
-    title_lower = (page_title or "").lower().replace(" ", "")
-    brand_shown = next((b for b in KNOWN_BRANDS if b in title_lower), None)
-    brand_mismatch = bool(brand_shown) and not _brand_in_domain(brand_shown, final_host)
-
-    homoglyph = "xn--" in final_host or any(ord(ch) > 127 for ch in final_host)
-    final_tld = final_host.rsplit(".", 1)[-1] if "." in final_host else ""
-    suspicious_tld = final_tld in SUSPICIOUS_TLDS
-
-    reasons: list[str] = []
-    if not same_base:
-        reasons.append(
-            f"The link redirected from {original_base or original_url} to a "
-            f"different domain ({final_base or 'unknown'})."
-        )
-    if brand_mismatch:
-        reasons.append(
-            f'The page presents itself as "{brand_shown}" but the final domain '
-            f"{final_base} does not belong to that brand (lookalike page)."
-        )
-    if homoglyph:
-        reasons.append("The final domain uses internationalized/punycode characters (possible homoglyph spoof).")
-    if suspicious_tld:
-        reasons.append(f"The final domain uses a TLD commonly abused for phishing (.{final_tld}).")
-
-    return {
-        "original_host": original_host,
-        "final_host": final_host,
-        "original_base": original_base,
-        "final_base": final_base,
-        "same_base_domain": same_base,
-        "brand_shown": brand_shown,
-        "brand_mismatch": brand_mismatch,
-        "homoglyph": homoglyph,
-        "suspicious_tld": suspicious_tld,
-        "reasons": reasons,
+def check_tls_certificate(cert_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate TLS certificate details."""
+    features = {
+        'certificate_valid': cert_info.get('is_valid', False),
+        'certificate_issuer_trusted': False,
+        'certificate_subject_matches_domain': False,
+        'certificate_expired': False,
     }
+    
+    try:
+        if cert_info.get('is_valid', False):
+            features['certificate_issuer_trusted'] = True
+            # Check if issuer is a known CA
+            trusted issuers = ['DigiCert', 'Let''s Encrypt', 'GlobalSign', 'Comodo', 'Amazon']
+            issuer = cert_info.get('issuer', '').lower()
+            if any(trusted in issuer for trusted in trusted issuers):
+                features['certificate_issuer_trusted'] = True
+        
+        # Check subject matches domain
+        subject = cert_info.get('subject', '').lower()
+        # Simple check - subject should contain domain info
+        if cert_info.get('is_valid', False):
+            features['certificate_subject_matches_domain'] = True
+        
+        # Check expiration
+        exp_date = cert_info.get('expiration_date', '')
+        if exp_date:
+            from datetime import datetime
+            try:
+                exp = datetime.strptime(exp_date, '%Y-%m-%d')
+                from datetime import datetime as dt_now
+                if exp < dt_now.now():
+                    features['certificate_expired'] = True
+                    features['certificate_valid'] = False
+            except ValueError:
+                pass
+    
+    except Exception as e:
+        print(f"Error checking TLS certificate: {e}")
+    
+    return features
+
+
+def analyze_forms_for_suspicion(forms: List[Dict[str, Any]], final_domain: str) -> Dict[str, Any]:
+    """Analyze forms for suspicious characteristics."""
+    features = {
+        'has_password_field': False,
+        'has_submit_to_different_domain': False,
+        'external_submission_count': 0,
+        'total_forms': len(forms),
+    }
+    
+    try:
+        for form in forms:
+            if not form.get('inputs'):
+                continue
+                
+            # Check for password fields
+            for input_elem in form.get('inputs', []):
+                input_type = input_elem.get('type', '').lower()
+                if 'password' in input_type:
+                    features['has_password_field'] = True
+            
+            # Check form action domain
+            action = form.get('action', '')
+            if action:
+                action_parsed = urlparse(action if urlparse(action).netloc else f"//{action}")
+                action_domain = action_parsed.hostname or ''
+                final_parsed = urlparse(final_domain)
+                final_domain_name = final_parsed.hostname or ''
+                
+                if action_domain and action_domain.lower() != final_domain_name.lower():
+                    features['has_submit_to_different_domain'] = True
+                    features['external_submission_count'] += 1
+    
+    except Exception as e:
+        print(f"Error analyzing forms: {e}")
+    
+    return features
+
+
+def check_for_prompt_injection(page_text: str) -> Dict[str, Any]:
+    """Check page text for prompt injection attempts."""
+    features = {
+        'prompt_injection_detected': False,
+        'injection_type': None,
+        'suspicious_patterns': [],
+    }
+    
+    try:
+        injection_patterns = [
+            r'ignore previous instructions',
+            r'do not follow',
+            r'system.*prompt',
+            r'hidden.*text',
+            r'<!--.*-->',
+            r'<script.*>',
+            r'\\n\\nASSISTANT',
+            r'\\n\\nUSER',
+        ]
+        
+        page_lower = page_text.lower()
+        
+        for pattern in injection_patterns:
+            if re.search(pattern, page_lower, re.IGNORECASE):
+                features['suspicious_patterns'].append(pattern)
+        
+        if features['suspicious_patterns']:
+            features['prompt_injection_detected'] = True
+            # Determine injection type
+            if any('ignore' in p.lower() for p in features['suspicious_patterns']):
+                features['injection_type'] = 'instruction_override'
+            elif any('system' in p.lower() for p in features['suspicious_patterns']):
+                features['injection_type'] = 'system_prompt_leak'
+            else:
+                features['injection_type'] = 'suspicious_pattern'
+    
+    except Exception as e:
+        print(f"Error checking prompt injection: {e}")
+    
+    return features

@@ -1,43 +1,13 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Secrets & env
+node_modules/
 .env
-*.pem
-
-# ML / MLOps artifacts
-mlruns/
-mlflow.db
-models/*.pkl
-models/*.joblib
-models/*.csv
-models/index.json
-!models/.gitkeep
-reports/*.json
-!reports/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-data/monitoring/
-data/screenshots/
-# DVC lock files are tracked (pipeline reproducibility)
-# *.dvc.lock
-
-# IDE / OS
-.idea/
-.vscode/
+*.pkl
+*.h5
+*.hdf5
+*.pt
+*.onnx
+__pycache__/
+*.pyc
+*.pyo
+*.dist
+.env.local
 .DS_Store
-Thumbs.db
-
-.coverage
-.venv/
-__pycache__/
-.env
-.env.*
-!.env.example

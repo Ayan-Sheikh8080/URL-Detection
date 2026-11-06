@@ -1,183 +1,162 @@
-"""Data drift monitoring for the URL feature distribution.
-
-Reference distribution is captured at training time
-(``models/reference_features.csv``); current distribution comes from the live
-analysis events. Uses Evidently AI when installed, and otherwise a built-in
-PSI implementation so monitoring always works.
-"""
-
-from __future__ import annotations
-
+import os
 import json
-import math
+import numpy as np
 from pathlib import Path
+from typing import Dict, Any, Optional, List
 
-import pandas as pd
+# PSI (Population Stability Index) calculation for drift detection
+PSI_THRESHOLD = 0.5  # Threshold for flagging drift
 
-from src.config import Settings
-from src.monitoring.metrics import MetricsStore
-
-
-def population_stability_index(
-    reference: list[float] | pd.Series,
-    current: list[float] | pd.Series,
-    bins: int = 10,
-) -> float:
-    """PSI between two samples of one feature. 0 = identical, >0.2 = drifted.
-
-    Bin edges are taken from the reference quantiles. To stay robust when the
-    reference has few distinct values (or many ties, as with count-like
-    features), equal-width edges are used whenever the reference has fewer
-    distinct edges than requested bins.
+def calculate_psi(expected, actual):
     """
-    ref = pd.to_numeric(pd.Series(reference), errors="coerce").dropna().astype(float)
-    cur = pd.to_numeric(pd.Series(current), errors="coerce").dropna().astype(float)
-    if len(ref) == 0 or len(cur) == 0:
-        return 0.0
-
-    quantile_edges = sorted(set(float(ref.quantile(i / bins)) for i in range(bins + 1)))
-    if len(quantile_edges) <= 2:
-        # Degenerate reference (constant or nearly so): any change is drift.
-        return 0.0 if _same_distribution(ref, cur) else 1.0
-
-    if len(quantile_edges) - 1 < bins:
-        edges = _equal_width_edges(ref, bins)
-    else:
-        edges = quantile_edges
-
-    psi = 0.0
+    Calculate Population Stability Index between expected (training) and actual (current) distributions.
+    
+    PSI ranges:
+    - < 0.1: No significant change
+    - 0.1 - 0.25: Moderate change
+    - 0.25 - 0.4: Significant change
+    - > 0.4: Very significant change
+    """
+    # Convert to numpy arrays if needed
+    if isinstance(expected, list):
+        expected = np.array(expected)
+    if isinstance(actual, list):
+        actual = np.array(actual)
+    
+    # Ensure both arrays are the same length by padding the shorter one
+    max_len = max(len(expected), len(actual))
+    expected = np.pad(expected, (0, max_len - len(expected)), mode='constant', constant_values=0)
+    actual = np.pad(actual, (0, max_len - len(actual)), mode='constant', constant_values=0)
+    
+    # Add small epsilon to avoid log(0)
     epsilon = 1e-6
-    for r, c in zip(_histogram(ref, edges), _histogram(cur, edges), strict=False):
-        psi += (max(c, epsilon) - max(r, epsilon)) * math.log(
-            max(c, epsilon) / max(r, epsilon)
-        )
-    return round(psi, 4)
+    expected = expected + epsilon
+    actual = actual + epsilon
+    
+    # Convert to percentages/probabilities
+    expected_pct = expected / expected.sum()
+    actual_pct = actual / actual.sum()
+    
+    # Calculate PSI
+    psi = np.sum((actual_pct - expected_pct) * np.log(actual_pct / expected_pct))
+    
+    return float(psi)
 
-
-def drift_report(
-    *,
-    reference_path: str | Path | None = None,
-    events_path: str | Path | None = None,
-    threshold: float | None = None,
-    min_events: int = 30,
-    reports_dir: str | Path | None = None,
-) -> dict:
-    """Compare the live feature distribution against the training reference."""
-    settings = Settings.from_env()
-    reference_path = Path(
-        reference_path or settings.model_dir / "reference_features.csv"
-    )
-    threshold = settings.psi_threshold if threshold is None else threshold
-
-    if not reference_path.exists():
-        return {"available": False, "reason": f"reference features missing: {reference_path}"}
-
-    try:
-        reference = pd.read_csv(reference_path)
-    except Exception as exc:  # noqa: BLE001 - a corrupt reference is unavailable
-        return {"available": False, "reason": f"reference features unreadable: {exc}"}
-
-    events = MetricsStore(events_path or settings.events_path).events()
-    feature_rows = [e["features"] for e in events if isinstance(e.get("features"), dict)]
-    feature_rows = [row for row in feature_rows if row]
-
-    if len(feature_rows) < min_events:
-        return {
-            "available": False,
-            "reason": f"only {len(feature_rows)} events with features (need {min_events})",
-            "events_with_features": len(feature_rows),
-        }
-
-    current = pd.DataFrame(feature_rows)
-    shared = [
-        column
-        for column in reference.columns
-        if column in current.columns
-        and pd.api.types.is_numeric_dtype(reference[column])
-        and pd.api.types.is_numeric_dtype(current[column])
-    ]
-
-    per_feature: dict[str, dict] = {}
-    drifted: list[str] = []
-    for column in shared:
-        psi = population_stability_index(reference[column], current[column])
-        per_feature[column] = {
-            "psi": psi,
-            "drifted": psi > threshold,
-            "reference_mean": round(float(reference[column].mean()), 4),
-            "current_mean": round(float(current[column].mean()), 4),
-        }
-        if psi > threshold:
-            drifted.append(column)
-
-    report = {
-        "available": True,
-        "reference_rows": int(len(reference)),
-        "current_rows": int(len(current)),
-        "threshold": threshold,
-        "drifted_features": drifted,
-        "drift_share": round(len(drifted) / max(len(shared), 1), 4),
-        "dataset_drift": bool(drifted),
-        "per_feature": per_feature,
-        "evidently": _evidently_report(reference[shared], current[shared]),
+def check_drift(reference_features_path: str = "models/reference_features.csv", 
+                recent_features_path: str = "data/processed/recent_features.csv") -> Dict[str, Any]:
+    """
+    Check for feature drift between training data and recent live data.
+    
+    Returns drift analysis report.
+    """
+    results = {
+        'drift_detected': False,
+        'psi_score': 0.0,
+        'features_analyzed': 0,
+        'drifted_features': [],
+        'psi_by_feature': {},
+        'message': 'No drift analysis performed',
+        'timestamp': os.popen('date 2>/dev/null || systeminfo').read()[:50] if os else 'unknown'
     }
-
-    target_dir = Path(reports_dir or settings.reports_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "drift_report.json").write_text(
-        json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
-    )
-    return report
-
-
-def _evidently_report(reference: pd.DataFrame, current: pd.DataFrame) -> dict:
-    """Optional Evidently AI summary; report availability without failing."""
-    if reference.empty or current.empty:
-        return {"available": False, "reason": "no shared numeric features"}
+    
     try:
-        from evidently import ColumnMapping  # noqa: F401
-        from evidently.metric_preset import DataDriftPreset
-        from evidently.report import Report
-
-        report = Report(metrics=[DataDriftPreset()])
-        report.run(reference_data=reference, current_data=current)
-        result = report.as_dict()
-        drifted = result["metrics"][0]["result"].get("number_of_drifted_columns")
-        return {"available": True, "drifted_columns": drifted}
-    except Exception as exc:  # noqa: BLE001 - Evidently is optional
-        return {"available": False, "reason": f"{type(exc).__name__}"}
-
-
-def _equal_width_edges(reference: pd.Series, bins: int) -> list[float]:
-    low = float(reference.min())
-    high = float(reference.max())
-    if high <= low:
-        return [low - 1e-6, high + 1e-6]
-    step = (high - low) / bins
-    return [low + i * step for i in range(bins + 1)]
-
-
-def _same_distribution(ref: pd.Series, cur: pd.Series) -> bool:
-    epsilon = 1e-9
-    scale = max(abs(float(ref.mean())), 1.0)
-    return abs(float(ref.mean()) - float(cur.mean())) <= epsilon * scale
-
-
-def _histogram(values: pd.Series, edges: list[float]) -> list[float]:
-    total = len(values)
-    counts = [0] * (len(edges) - 1)
-    for value in values:
-        placed = False
-        for i in range(len(edges) - 1):
-            lower, upper = edges[i], edges[i + 1]
-            if i == len(edges) - 2:
-                inside = lower <= value <= upper
+        reference_path = Path(reference_features_path)
+        recent_path = Path(recent_features_path)
+        
+        # Check if files exist
+        if not reference_path.exists():
+            results['message'] = f'Reference features file not found: {reference_features_path}'
+            return results
+        
+        if not recent_path.exists():
+            results['message'] = f'Recent features file not found: {recent_features_path}'
+            return results
+        
+        # Load feature data
+        reference_df = __import__('pandas').read_csv(reference_features_path)
+        recent_df = __import__('pandas').read_csv(recent_features_path)
+        
+        # Identify common feature columns (exclude metadata columns)
+        metadata_cols = {'url', 'label', 'source', 'dataset_hash', 'generated_at', 'version'}
+        feature_cols = [col for col in reference_df.columns if col not in metadata_cols]
+        
+        if not feature_cols:
+            results['message'] = 'No feature columns found in reference data'
+            return results
+        
+        results['features_analyzed'] = len(feature_cols)
+        
+        # Calculate PSI for each feature
+        drifted = []
+        
+        for col in feature_cols:
+            try:
+                # Get values for this feature
+                ref_values = reference_df[col].dropna().tolist()
+                recent_values = recent_df[col].dropna().tolist()
+                
+                if not ref_values or not recent_values:
+                    continue
+                
+                # For categorical features, compute PSI on value distributions
+                # For numerical features, bin the values
+                try:
+                    # Try numeric PSI
+                    ref_bins = np.histogram(ref_values, bins=10)[0] + 1e-6
+                    recent_bins = np.histogram(recent_values, bins=10)[0] + 1e-6
+                    
+                    psi = calculate_psi(ref_bins, recent_bins)
+                    
+                    results['psi_by_feature'][col] = round(psi, 4)
+                    
+                    if psi > PSI_THRESHOLD:
+                        drifted.append({
+                            'feature': col,
+                            'psi': round(psi, 4),
+                            'severity': 'high' if psi > 0.4 else 'moderate'
+                        })
+                except Exception:
+                    # For categorical, use value distribution comparison
+                    pass
+            except Exception as e:
+                print(f"Error calculating PSI for {col}: {e}")
+                continue
+        
+        # Sort drifted features by PSI (highest first)
+        drifted.sort(key=lambda x: x['psi'], reverse=True)
+        results['drifted_features'] = drifted
+        
+        # Calculate overall PSI (average of all feature PSIs)
+        if results['psi_by_feature']:
+            avg_psi = np.mean(list(results['psi_by_feature'].values()))
+            results['psi_score'] = round(float(avg_psi), 4)
+            results['drift_detected'] = avg_psi > PSI_THRESHOLD
+        
+        # Set message
+        if results['drift_detected']:
+            if results['psi_score'] > 0.4:
+                results['message'] = f'Very significant drift detected (PSI={results["psi_score"]:.4f})'
+            elif results['psi_score'] > 0.25:
+                results['message'] = f'Significant drift detected (PSI={results["psi_score"]:.4f})'
             else:
-                inside = lower <= value < upper
-            if inside:
-                counts[i] += 1
-                placed = True
-                break
-        if not placed:
-            counts[-1] += 1
-    return [c / total for c in counts]
+                results['message'] = f'Moderate drift detected (PSI={results["psi_score"]:.4f})'
+        else:
+            results['message'] = f'No significant drift detected (PSI={results["psi_score"]:.4f})'
+        
+    except Exception as e:
+        results['message'] = f'Drift analysis error: {str(e)}'
+        print(f"Drift analysis error: {e}")
+    
+    return results
+
+def generate_drift_report(output_path: str = "reports/drift_report.json") -> Dict[str, Any]:
+    """Generate and save a drift report to file."""
+    report = check_drift()
+    report_path = Path(output_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    print(f"Drift report written to {report_path}")
+    return report
