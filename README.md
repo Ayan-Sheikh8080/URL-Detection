@@ -56,7 +56,7 @@ python -m src.training.train
 # or: dvc repro
 ```
 
-It validates and normalizes the PhiUSIIL dataset and compares Logistic Regression, Random Forest, and XGBoost for URL-only, page-content-only, and combined models. Page models use the six fields available both in the dataset and live browser analysis: password-field presence, external-form presence, iframe count, redirect count, title length, and HTTPS. Reports include precision, recall, F1, confusion matrices, inference latency, and local cloud cost. MLflow tracks runs when installed; the full `requirements.txt` includes MLflow, DVC with S3 support, SHAP, and Evidently.
+It validates and normalizes the PhiUSIIL dataset and compares Logistic Regression, Random Forest, and XGBoost for URL-only, page-content-only, and combined models. Page models use the six fields available both in the dataset and live browser analysis: password-field presence, external-form presence, iframe count, redirect count, title length, and HTTPS. Reports include precision, recall, F1, confusion matrices, inference latency, and local cloud cost. Training uses the CPU-only XGBoost package to avoid pulling CUDA/NCCL libraries into the API image. MLflow tracks runs when installed; the full `requirements.txt` includes MLflow, DVC with S3 support, SHAP, and Evidently.
 
 To use an S3 DVC remote, configure a bucket and AWS credentials outside the repository:
 

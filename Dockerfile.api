@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MLFLOW_TRACKING_URI=sqlite:////app/mlflow.db
 
 COPY requirements-training.txt requirements-runtime.txt .
-RUN pip install --no-cache-dir -r requirements-training.txt
+RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements-training.txt
 COPY src ./src
 COPY data/raw ./data/raw
 RUN python -m src.data.prepare --strict \

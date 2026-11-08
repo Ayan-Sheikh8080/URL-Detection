@@ -12,7 +12,7 @@ setup(
         "numpy>=1.24.0",
         "pandas>=2.1.0",
         "scikit-learn>=1.3.0",
-        "xgboost>=2.0.0",
+        "xgboost-cpu>=2.1.1,<4.0",
         "playwright>=1.42.0",
         "mlflow>=2.10.0",
         "boto3>=1.34.0",
