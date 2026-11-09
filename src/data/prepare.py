@@ -190,8 +190,9 @@ def prepare_dataset(raw_path: Path = RAW_PATH) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--strict", action="store_true", help="fail if any rows need cleanup")
+    parser.add_argument("-i", "--input", type=Path, default=RAW_PATH, help="Raw CSV to prepare")
     args = parser.parse_args()
-    metadata = prepare_dataset()
+    metadata = prepare_dataset(args.input)
     if args.strict and metadata["issues"]:
         print(f"Strict validation failed with {len(metadata['issues'])} issue(s)")
         return 1

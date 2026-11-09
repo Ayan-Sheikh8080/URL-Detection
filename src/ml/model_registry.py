@@ -119,3 +119,12 @@ class ModelRegistry:
         if not path.exists():
             return {"trained": False, "configurations": {}}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def versions(self) -> dict[str, Any]:
+        path = self.models_dir / "registry" / "manifest.json"
+        if not path.exists():
+            return {"name": "phishing-url-analyzer", "latest_version": None, "versions": []}
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(manifest.get("versions"), list):
+            raise ValueError(f"Invalid model registry manifest at {path}")
+        return manifest

@@ -14,11 +14,13 @@ import httpx
 
 from src.agent.browser import SCREENSHOT_DIR, UnsafeTarget, analyze_url, validate_public_url
 from src.agent.features import extract_content_features
-from src.agent.reasoning import ReasoningInput, get_reasoner
+from src.agent.orchestrator import URLAnalysisOrchestrator
+from src.agent.reasoning import get_reasoner
 from src.ml.features import extract_url_features
 from src.ml.model_registry import ModelRegistry
 from src.monitoring.drift import check_feature_drift
 from src.monitoring.metrics import MonitoringMetrics
+from src.rag.pipeline import INDEX_PATH, RagVectorStore
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ app = FastAPI(
 )
 model_registry = ModelRegistry()
 monitoring = MonitoringMetrics()
+rag_store = RagVectorStore()
 prometheus_registry = CollectorRegistry()
 analysis_counter = Counter(
     "url_analyzer_analyses_total",
@@ -98,6 +101,7 @@ def root() -> dict:
         "endpoints": [
             "/api/analyze",
             "/api/health",
+            "/api/models/versions",
             "/api/monitoring/stats",
             "/api/monitoring/drift",
             "/metrics",
@@ -114,7 +118,14 @@ def health() -> dict:
         "service": "phishing-url-analyzer",
         "version": "1.0.0",
         "model_ready": bool(index.get("configurations")),
+        "model_version": index.get("model_version"),
+        "rag_ready": INDEX_PATH.is_file(),
     }
+
+
+@app.get("/api/models/versions")
+def model_versions() -> dict:
+    return model_registry.versions()
 
 
 @app.post("/api/analyze")
@@ -165,14 +176,20 @@ async def analyze(request: AnalysisRequest) -> dict:
         raise HTTPException(status_code=503, detail=f"Model inference failed: {error}") from error
 
     reasoner = get_reasoner("bedrock" if request.use_llm else None)
-    reasoning = reasoner.reason(
-        ReasoningInput(
-            url=request.url,
-            url_model_score=prediction["score"],
-            evidence=evidence,
+    orchestrator = URLAnalysisOrchestrator(rag_store, reasoner)
+    try:
+        workflow = orchestrator.run(
+            request.url,
+            prediction["score"],
+            evidence,
             page_text=evidence.get("page_text", ""),
         )
-    )
+    except FileNotFoundError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="RAG index is unavailable. Run `dvc repro rag_index` before analyzing URLs.",
+        ) from error
+    reasoning = workflow.reasoning
     if not browser_result["browser_ok"]:
         reasoning.reasons.append(
             "Browser evidence was unavailable; interpret this result as URL-model-only evidence"
@@ -223,6 +240,17 @@ async def analyze(request: AnalysisRequest) -> dict:
         "load_ms": round(elapsed_ms, 2),
         "estimated_cloud_cost_usd": estimated_cost,
         "reasoner": reasoning.reasoner,
+        "rag_retrieval": [
+            {
+                "source": result["source"],
+                "similarity": round(float(result["similarity"]), 4),
+                "label": result["label"],
+                "text": result["text"],
+            }
+            for result in workflow.retrieved_context
+        ],
+        "agent_trace": workflow.trace,
+        "agent_rounds": workflow.rounds,
     }
 
 

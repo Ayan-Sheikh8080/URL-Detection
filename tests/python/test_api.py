@@ -24,6 +24,11 @@ def test_analysis_endpoint_returns_real_pipeline_response(monkeypatch):
         "record_analysis",
         lambda data: {"analysis_id": 1, **data},
     )
+    monkeypatch.setattr(
+        main.rag_store,
+        "search",
+        lambda _query, top_k=3: [],
+    )
 
     response = TestClient(main.app).post(
         "/api/analyze",
@@ -36,6 +41,9 @@ def test_analysis_endpoint_returns_real_pipeline_response(monkeypatch):
     assert body["model_family"] == "test_model"
     assert body["browser_ok"] is False
     assert "evidence_summary" in body
+    assert body["rag_retrieval"] == []
+    assert body["agent_rounds"] == 1
+    assert body["agent_trace"]
 
 
 def test_health_endpoint_reports_model_readiness():

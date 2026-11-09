@@ -41,6 +41,7 @@ Other endpoints:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | Service and model readiness |
+| `GET /api/models/versions` | Version-tagged local model registry manifest |
 | `GET /api/monitoring/stats` | Analysis totals, verdicts, latency, failures, and measured cloud cost |
 | `GET /api/monitoring/drift` | PSI drift report against the training feature reference |
 | `GET /metrics` | Prometheus metrics |
@@ -48,15 +49,28 @@ Other endpoints:
 
 ## Data, training, and tracking
 
-The reproducible pipeline is in `dvc.yaml`. Place `PhiUSIIL_Phishing_URL_Dataset.csv` in `data/raw/`; preparation recognizes its `URL`/`label` schema, maps source label `0` (phishing) to the service's phishing label `1`, deduplicates identical URLs, and rejects conflicting labels. Dataset URLs containing user-info are accepted only in the offline training path; the API still rejects credential-bearing URLs.
+The reproducible pipeline is in `dvc.yaml`. The source CSV remains Git-versioned so clean checkouts and CI can reproduce without an unconfigured cloud remote; the first DVC stage creates a hash-verified snapshot of that raw dataset, and DVC versions the snapshot, processed dataset, trained models, and retrieval index. Configure a DVC remote to share the DVC-managed artifacts between machines. Preparation recognizes the PhiUSIIL `URL`/`label` schema, maps source label `0` (phishing) to the service's phishing label `1`, deduplicates identical URLs, and rejects conflicting labels. Dataset URLs containing user-info are accepted only in offline training; the RAG corpus removes URL user-info and query values, and the API rejects credential-bearing URLs.
 
 ```sh
 python -m src.data.prepare --strict
 python -m src.training.train
-# or: dvc repro
+# or reproduce prepare, train, and rag_index together:
+dvc repro
 ```
 
-It validates and normalizes the PhiUSIIL dataset and compares Logistic Regression, Random Forest, and XGBoost for URL-only, page-content-only, and combined models. Page models use the six fields available both in the dataset and live browser analysis: password-field presence, external-form presence, iframe count, redirect count, title length, and HTTPS. Reports include precision, recall, F1, confusion matrices, inference latency, and local cloud cost. Training uses the CPU-only XGBoost package to avoid pulling CUDA/NCCL libraries into the API image. MLflow tracks runs when installed; the full `requirements.txt` includes MLflow, DVC with S3 support, SHAP, and Evidently.
+It validates and normalizes the PhiUSIIL dataset and compares Logistic Regression, Random Forest, and XGBoost for URL-only, page-content-only, and combined models. Page models use the six fields available both in the dataset and live browser analysis: password-field presence, external-form presence, iframe count, redirect count, title length, and HTTPS. Reports include precision, recall, F1, confusion matrices, inference latency, and local cloud cost. Training uses CPU-only XGBoost, logs candidate model artifacts and metrics to MLflow, and writes version-tagged model bundles under `models/registry/`. The full `requirements.txt` includes MLflow, DVC with S3 support, SHAP, and Evidently.
+
+The RAG stage ingests `data/rag_source/*.md` and a deterministic, label-balanced sample of the processed dataset, chunks documents, generates 2,048-dimensional normalized hashing-vector embeddings, and persists them in a SQLite cosine-similarity vector index. This offline lexical retriever has no external service or embedding-model download requirement; retrieved cases are supporting context, not ground truth. Add `.md` or `.txt` references under `data/rag_source/`, then run `dvc repro rag_index`. The API returns its retrieved context and bounded specialist-agent trace with each analysis. Run the offline agent harness against a small sample with `python -m src.agent.harness --limit 25`.
+
+An optional Hugging Face fine-tuning pipeline preprocesses balanced URL/page-feature text, tokenizes it with a pretrained tokenizer, trains DistilBERT on CPU, and reports a stratified validation set. It is intentionally separate from the default API/DVC pipeline to avoid downloading PyTorch and model weights for ordinary runs:
+
+```powershell
+python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+python -m pip install -r requirements-hf.txt
+python -m src.training.hf_pipeline run --max-per-class 2000 --epochs 1
+```
+
+The Hugging Face model, tokenizer, dataset hash, validation metrics, and version tags are saved under `models/huggingface/`; MLflow logs the model artifacts and metrics when available. Model and tokenizer downloads require access to the Hugging Face Hub.
 
 To use an S3 DVC remote, configure a bucket and AWS credentials outside the repository:
 

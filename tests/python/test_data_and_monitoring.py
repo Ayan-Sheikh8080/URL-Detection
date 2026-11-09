@@ -3,11 +3,24 @@ import csv
 import pytest
 
 from src.data import prepare
+from src.data.snapshot import snapshot_dataset
 from src.agent.features import CONTENT_MODEL_FEATURE_NAMES, extract_content_features
 from src.monitoring.drift import check_feature_drift
 from src.monitoring.metrics import MonitoringMetrics
 from src.ml.features import URL_FEATURE_NAMES
 from src.training.train import _model_input
+
+
+def test_dvc_raw_snapshot_preserves_content_and_records_hash(tmp_path):
+    source = tmp_path / "source.csv"
+    snapshot = tmp_path / "versioned" / "snapshot.csv"
+    source.write_text("url,label\nhttps://example.com,0\n", encoding="utf-8")
+
+    metadata = snapshot_dataset(source, snapshot)
+
+    assert snapshot.read_bytes() == source.read_bytes()
+    assert metadata["size_bytes"] == source.stat().st_size
+    assert len(metadata["sha256"]) == 64
 
 
 def test_prepare_normalizes_deduplicates_and_reports_invalid_rows(tmp_path, monkeypatch):
