@@ -1,0 +1,25 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python -m src.training.hf_pipeline prepare --input 
+      data/processed/urls_processed.csv --output 
+      data/processed/hf_training.jsonl --metadata 
+      data/metadata/hf_training_meta.json --max-per-class 2000
+    deps:
+    - path: data/processed/urls_processed.csv
+      hash: md5
+      md5: 52758544c365936a4d20b5b386110fa5
+      size: 17177798
+    - path: src/training/hf_pipeline.py
+      hash: md5
+      md5: 59b2df42feb30aabf51de523b280975b
+      size: 12217
+    outs:
+    - path: data/metadata/hf_training_meta.json
+      hash: md5
+      md5: 0acc9710b0d6a2e87c59636e561699be
+      size: 370
+    - path: data/processed/hf_training.jsonl
+      hash: md5
+      md5: 574536c4c349b6e229c792880d5c8bf7
+      size: 776171
