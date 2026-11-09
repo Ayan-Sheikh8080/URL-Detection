@@ -1,0 +1,21 @@
+stages:
+  prepare:
+    wdir: ../..
+    cmd: python -m src.training.hf_pipeline prepare --input data/processed/urls_processed.csv --output data/processed/hf_training.jsonl --metadata data/metadata/hf_training_meta.json --max-per-class 2000
+    deps:
+      - data/processed/urls_processed.csv
+      - src/training/hf_pipeline.py
+    outs:
+      - data/processed/hf_training.jsonl
+      - data/metadata/hf_training_meta.json
+  train:
+    wdir: ../..
+    cmd: python -m src.training.hf_pipeline train --input data/processed/hf_training.jsonl --output models/huggingface --metrics reports/hf_evaluation.json --model-name distilbert-base-uncased --epochs 1
+    deps:
+      - data/processed/hf_training.jsonl
+      - src/training/hf_pipeline.py
+    outs:
+      - models/huggingface
+    metrics:
+      - reports/hf_evaluation.json:
+          cache: false

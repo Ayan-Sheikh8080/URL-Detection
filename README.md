@@ -62,15 +62,15 @@ It validates and normalizes the PhiUSIIL dataset and compares Logistic Regressio
 
 The RAG stage ingests `data/rag_source/*.md` and a deterministic, label-balanced sample of the processed dataset, chunks documents, generates 2,048-dimensional normalized hashing-vector embeddings, and persists them in a SQLite cosine-similarity vector index. This offline lexical retriever has no external service or embedding-model download requirement; retrieved cases are supporting context, not ground truth. Add `.md` or `.txt` references under `data/rag_source/`, then run `dvc repro rag_index`. The API returns its retrieved context and bounded specialist-agent trace with each analysis. Run the offline agent harness against a small sample with `python -m src.agent.harness --limit 25`.
 
-An optional Hugging Face fine-tuning pipeline preprocesses balanced URL/page-feature text, tokenizes it with a pretrained tokenizer, trains DistilBERT on CPU, and reports a stratified validation set. It is intentionally separate from the default API/DVC pipeline to avoid downloading PyTorch and model weights for ordinary runs:
+An optional Hugging Face fine-tuning pipeline preprocesses balanced URL/page-feature text, tokenizes it with a pretrained tokenizer, trains DistilBERT on CPU, and reports a stratified validation set. Its DVC stages are kept separate from the default pipeline so ordinary runs do not download PyTorch or model weights:
 
 ```powershell
 python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
 python -m pip install -r requirements-hf.txt
-python -m src.training.hf_pipeline run --max-per-class 2000 --epochs 1
+dvc repro pipelines\huggingface\dvc.yaml
 ```
 
-The Hugging Face model, tokenizer, dataset hash, validation metrics, and version tags are saved under `models/huggingface/`; MLflow logs the model artifacts and metrics when available. Model and tokenizer downloads require access to the Hugging Face Hub.
+The Hugging Face model, tokenizer, dataset hash, validation metrics, and version tags are saved under `models/huggingface/`; the dedicated DVC pipeline tracks the sampled dataset, model artifacts, and validation metrics, and MLflow logs the model artifacts and metrics when available. Model and tokenizer downloads require access to the Hugging Face Hub.
 
 To use an S3 DVC remote, configure a bucket and AWS credentials outside the repository:
 
