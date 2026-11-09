@@ -1,137 +1,89 @@
+"""Summarize the stratified holdout report written by model training."""
+
 import json
-import numpy as np
-import pandas as pd
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-# Paths
-EVALUATION_PATH = Path("reports/evaluation.json")
-REPORT_PATH = Path("reports/evaluation_detailed.json")
-MODELS_DIR = Path("models")
-
-
-def load_evaluation():
-    """Load the evaluation report generated during training."""
-    if not EVALUATION_PATH.exists():
-        print(f"Evaluation report not found at {EVALUATION_PATH}")
-        return None
-    
-    with open(EVALUATION_PATH, 'r') as f:
-        report = json.load(f)
-    
-    return report
+ROOT = Path(__file__).resolve().parents[2]
+EVALUATION_PATH = ROOT / "reports" / "evaluation.json"
+REPORT_PATH = ROOT / "reports" / "evaluation_detailed.json"
 
 
-def generate_detailed_report():
-    """Generate a detailed evaluation report with comparisons."""
-    report = load_evaluation()
-    if report is None:
-        return None
-    
-    results = report.get('results', {})
-    improvement = report.get('improvement', {})
-    
-    detailed = {
-        'timestamp': pd.Timestamp.now().isoformat(),
-        'dataset_info': report.get('dataset_info', {}),
-        'headline_metric': report.get('headline', ''),
-        'improvement_analysis': improvement,
-        'configuration_results': {},
-        'rankings': {}
+def load_evaluation(path: Path = EVALUATION_PATH) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Evaluation report not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def generate_detailed_report(
+    evaluation_path: Path = EVALUATION_PATH,
+    report_path: Path = REPORT_PATH,
+) -> dict[str, Any]:
+    report = load_evaluation(evaluation_path)
+    configurations = report.get("configurations", {})
+    detailed: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dataset_info": report.get("dataset_info", {}),
+        "experiment_tracking": report.get("experiment_tracking", "unknown"),
+        "headline_metric": report.get("headline", ""),
+        "configuration_results": {},
+        "rankings": {},
     }
-    
-    # Organize results by configuration
-    configs = {'url_only': [], 'content_only': [], 'combined': []}
-    
-    for config_name, result in results.items():
-        config_key = config_name.split('_')[1]  # Extract config type from name
-        model_name = result.get('model', 'Unknown')
-        f1 = result.get('f1', 0)
-        
-        configs[config_key].append({
-            'model': model_name,
-            'f1': f1,
-            'precision': result.get('precision', 0),
-            'recall': result.get('recall', 0)
-        })
-    
-    # Rank models within each configuration
-    for config_key, models in configs.items():
-        if models:
-            # Sort by F1 score descending
-            sorted_models = sorted(models, key=lambda x: x['f1'], reverse=True)
-            detailed['rankings'][config_key] = [
-                f"{m['model']}: F1={m['f1']:.4f}, Precision={m['precision']:.4f}, Recall={m['recall']:.4f}"
-                for m in sorted_models
-            ]
-    
-    # Calculate improvements
-    url_only_f1 = None
-    combined_best_f1 = None
-    
-    if 'url_only' in detailed['rankings'] and detailed['rankings']['url_only']:
-        url_only_f1 = detailed['rankings']['url_only'][0].split('F1=')[1].split(',')[0]
-    
-    if 'combined' in detailed['rankings'] and detailed['rankings']['combined']:
-        combined_best_f1 = detailed['rankings']['combined'][0].split('F1=')[1].split(',')[0]
-    
-    if url_only_f1 and combined_best_f1:
-        try:
-            url_only_f1 = float(url_only_f1)
-            combined_best_f1 = float(combined_best_f1)
-            improvement_pct = (combined_best_f1 - url_only_f1) / url_only_f1 * 100 if url_only_f1 != 0 else 0
-            detailed['improvement_comparison'] = {
-                'url_only_best_f1': url_only_f1,
-                'combined_best_f1': combined_best_f1,
-                'improvement_percent': improvement_pct
+
+    for config_name, config in configurations.items():
+        models = [
+            {
+                "model": model_name,
+                "precision": float(metrics.get("precision", 0.0)),
+                "recall": float(metrics.get("recall", 0.0)),
+                "f1": float(metrics.get("f1", 0.0)),
+                "training_seconds": float(metrics.get("training_seconds", 0.0)),
+                "test_rows": int(metrics.get("test_rows", 0)),
             }
-        except (ValueError, TypeError):
-            detailed['improvement_comparison'] = {'error': 'Could not calculate improvement'}
+            for model_name, metrics in config.get("models", {}).items()
+        ]
+        models.sort(key=lambda result: (-result["f1"], result["model"]))
+        detailed["configuration_results"][config_name] = {
+            "sample_count": config.get("sample_count", 0),
+            "best_model": config.get("best_model"),
+            "best_holdout_f1": config.get("best_holdout_f1"),
+            "models": models,
+        }
+        detailed["rankings"][config_name] = models
+
+    url_f1 = configurations.get("url_only", {}).get("best_holdout_f1")
+    combined_f1 = configurations.get("combined", {}).get("best_holdout_f1")
+    if url_f1 is not None and combined_f1 is not None:
+        url_f1 = float(url_f1)
+        combined_f1 = float(combined_f1)
+        detailed["improvement_comparison"] = {
+            "url_only_best_f1": url_f1,
+            "combined_best_f1": combined_f1,
+            "absolute_change": combined_f1 - url_f1,
+            "improvement_percent": (
+                (combined_f1 - url_f1) / url_f1 * 100 if url_f1 else 0.0
+            ),
+        }
     else:
-        detailed['improvement_comparison'] = {'note': 'Insufficient data for comparison'}
-    
-    # Write detailed report
-    with open(REPORT_PATH, 'w') as f:
-        json.dump(detailed, f, indent=2)
-    
-    print(f"Detailed evaluation report written to {REPORT_PATH}")
+        detailed["improvement_comparison"] = {
+            "note": "URL-only and combined holdout results are both required"
+        }
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(detailed, indent=2), encoding="utf-8")
     return detailed
 
 
-def print_summary():
-    """Print a summary of evaluation results."""
-    report = load_evaluation()
-    if report is None:
-        return
-    
-    print("\n" + "=" * 60)
-    print("EVALUATION SUMMARY")
-    print("=" * 60)
-    
-    improvement = report.get('improvement', {})
-    if improvement:
-        url_f1 = improvement.get('url_only_f1', 0)
-        combined_f1 = improvement.get('combined_f1', 0)
-        imp_pct = improvement.get('improvement_percent', 0)
-        print(f"\nURL-only (Logistic Regression) F1: {url_f1:.4f}")
-        print(f"Combined (XGBoost) F1: {combined_f1:.4f}")
-        print(f"Improvement: {imp_pct:.2f}%")
-    
-    print("\nConfiguration Rankings:")
-    results = report.get('results', {})
-    
-    for config_type in ['url_only', 'content_only', 'combined']:
-        print(f"\n  {config_type.upper()}:")
-        config_results = [r for r in results.keys() if config_type in r]
-        if config_results:
-            for r in sorted(config_results, key=lambda x: results[x].get('f1', 0), reverse=True):
-                result = results[r]
-                print(f"    {r}: F1={result.get('f1', 0):.4f} ({result.get('model', '?')})")
-        else:
-            print("    No results available")
-    
-    print("\n" + "=" * 60)
+def main() -> int:
+    report = generate_detailed_report()
+    print(json.dumps({
+        "output": str(REPORT_PATH),
+        "configurations": list(report["configuration_results"]),
+        "improvement_comparison": report["improvement_comparison"],
+    }, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    print_summary()
-    generate_detailed_report()
+    raise SystemExit(main())

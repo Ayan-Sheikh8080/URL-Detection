@@ -3,7 +3,10 @@
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -25,7 +28,7 @@ from src.agent.features import (
     CONTENT_MODEL_FEATURE_NAMES,
     extract_content_features,
 )
-from src.data.prepare import PROCESSED_PATH, ROOT, normalize_url
+from src.data.prepare import METADATA_PATH, PROCESSED_PATH, ROOT, normalize_url
 from src.ml.features import URL_FEATURE_NAMES, extract_url_features
 
 RAW_EVIDENCE_PATH = ROOT / "data" / "raw" / "crawled_evidence.jsonl"
@@ -33,6 +36,8 @@ MODELS_DIR = ROOT / "models"
 REPORTS_DIR = ROOT / "reports"
 MODEL_PATH = MODELS_DIR / "model_bundle.joblib"
 EVALUATION_PATH = REPORTS_DIR / "evaluation.json"
+REGISTRY_DIR = MODELS_DIR / "registry"
+REGISTRY_MANIFEST_PATH = REGISTRY_DIR / "manifest.json"
 MODEL_FAMILIES = {
     "logistic_regression": lambda: LogisticRegression(
         max_iter=1000, class_weight="balanced", random_state=42
@@ -128,16 +133,24 @@ def _model_input(rows: list[dict], config: str) -> tuple[pd.DataFrame, np.ndarra
     return matrix, np.asarray(labels, dtype=int), order
 
 
-def _log_run(config: str, family: str, metrics: dict, feature_count: int) -> None:
+def _log_run(
+    config: str,
+    family: str,
+    metrics: dict,
+    feature_count: int,
+    model,
+    dataset_sha256: str,
+) -> str | None:
     if mlflow is None:
-        return
-    with mlflow.start_run(run_name=f"{config}-{family}"):
+        return None
+    with mlflow.start_run(run_name=f"{config}-{family}") as run:
         mlflow.log_params({
             "configuration": config,
             "model_family": family,
             "feature_count": feature_count,
             "train_test_split": 0.2,
             "random_state": 42,
+            "dataset_sha256": dataset_sha256,
         })
         mlflow.log_metrics({
             "precision": metrics["precision"],
@@ -147,6 +160,48 @@ def _log_run(config: str, family: str, metrics: dict, feature_count: int) -> Non
             "inference_latency_ms_per_url": metrics["inference_latency_ms_per_url"],
             "estimated_cloud_cost_usd_per_analysis": metrics["estimated_cloud_cost_usd_per_analysis"],
         })
+        mlflow.set_tags({
+            "dataset_sha256": dataset_sha256,
+            "model_family": family,
+            "pipeline": "dvc",
+        })
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            artifact_path = Path(temporary_directory) / "candidate.joblib"
+            joblib.dump(model, artifact_path)
+            mlflow.log_artifact(str(artifact_path), artifact_path="model")
+        return run.info.run_id
+
+
+def _register_local_version(
+    dataset_sha256: str,
+    best_model_runs: dict[str, str | None],
+    configurations: dict,
+) -> str:
+    timestamp = datetime.now(timezone.utc)
+    version = f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-{dataset_sha256[:8]}"
+    version_dir = REGISTRY_DIR / "versions" / version
+    version_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(MODEL_PATH, version_dir / MODEL_PATH.name)
+
+    manifest = {"schema_version": 1, "name": "phishing-url-analyzer", "versions": []}
+    if REGISTRY_MANIFEST_PATH.exists():
+        manifest = json.loads(REGISTRY_MANIFEST_PATH.read_text(encoding="utf-8"))
+    manifest["latest_version"] = version
+    manifest["versions"].append({
+        "version": version,
+        "created_at": timestamp.isoformat(),
+        "artifact": (version_dir / MODEL_PATH.name).relative_to(ROOT).as_posix(),
+        "dataset_sha256": dataset_sha256,
+        "tags": {
+            "dataset": "PhiUSIIL",
+            "pipeline": "dvc",
+            "holdout_type": "random_stratified",
+        },
+        "best_model_runs": best_model_runs,
+        "configurations": configurations,
+    })
+    REGISTRY_MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return version
 
 
 def train_models() -> dict:
@@ -169,6 +224,13 @@ def train_models() -> dict:
         )
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment("phishing-url-analysis")
+    dataset_metadata = (
+        json.loads(METADATA_PATH.read_text(encoding="utf-8"))
+        if METADATA_PATH.exists()
+        else {}
+    )
+    dataset_sha256 = str(dataset_metadata.get("source_sha256", "unknown"))
+    best_model_runs: dict[str, str | None] = {}
 
     bundle = {}
     evaluation = {
@@ -225,13 +287,21 @@ def train_models() -> dict:
                 ).tolist(),
                 "test_rows": int(len(y_test)),
             }
-            _log_run(config, family, metrics, len(feature_order))
+            run_id = _log_run(
+                config,
+                family,
+                metrics,
+                len(feature_order),
+                model,
+                dataset_sha256,
+            )
             results[family] = metrics
-            candidates.append((float(f1), family, model))
+            candidates.append((float(f1), family, model, run_id))
 
-        best_score, best_family, best_model = max(
+        best_score, best_family, best_model, best_run_id = max(
             candidates, key=lambda result: (result[0], result[1] == "logistic_regression")
         )
+        best_model_runs[config] = best_run_id
         bundle[config] = {
             "model": best_model,
             "model_family": best_family,
@@ -248,11 +318,24 @@ def train_models() -> dict:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, MODEL_PATH)
+    model_version = _register_local_version(
+        dataset_sha256,
+        best_model_runs,
+        {
+            name: {
+                "model_family": item["model_family"],
+                "holdout_f1": item["metrics"]["f1"],
+            }
+            for name, item in bundle.items()
+        },
+    )
 
     reference, _, reference_order = _model_input(evidence_rows, "combined")
     reference.to_csv(MODELS_DIR / "reference_features.csv", index=False)
     index = {
-        "version": "1.0.0",
+        "schema_version": 1,
+        "model_version": model_version,
+        "dataset_sha256": dataset_sha256,
         "model_artifact": str(MODEL_PATH.relative_to(ROOT)),
         "feature_order": reference_order,
         "configurations": {

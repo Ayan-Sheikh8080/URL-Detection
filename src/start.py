@@ -7,12 +7,15 @@ import uvicorn
 
 from src.data.prepare import METADATA_PATH, prepare_dataset
 from src.training.train import MODEL_PATH, train_models
+from src.rag.pipeline import INDEX_PATH, build_index
 
 
 def main() -> None:
     if not METADATA_PATH.exists() or not MODEL_PATH.exists():
         prepare_dataset()
         train_models()
+    if not INDEX_PATH.exists():
+        build_index()
     uvicorn.run(
         "src.api.main:app",
         host=os.getenv("HOST", "0.0.0.0"),

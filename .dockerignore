@@ -7,6 +7,8 @@ __pycache__
 .env.*
 data/metadata
 data/processed
+data/versioned
+data/rag
 data/monitoring
 data/screenshots
 models

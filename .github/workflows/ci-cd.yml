@@ -38,13 +38,10 @@ jobs:
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
 
-      - name: Validate and prepare dataset
-        run: python -m src.data.prepare --strict
-
-      - name: Train and compare models
+      - name: Reproduce data, training, and RAG pipelines
         env:
           MLFLOW_TRACKING_URI: sqlite:///mlflow.db
-        run: python -m src.training.train
+        run: python -m dvc repro
 
       - name: Run Python tests
         run: python -m pytest -q

@@ -1,9 +1,10 @@
 schema: '2.0'
 stages:
   prepare:
-    cmd: python -m src.data.prepare --strict
+    cmd: python -m src.data.prepare --strict --input 
+      data/versioned/PhiUSIIL_Phishing_URL_Dataset.csv
     deps:
-    - path: data/raw/PhiUSIIL_Phishing_URL_Dataset.csv
+    - path: data/versioned/PhiUSIIL_Phishing_URL_Dataset.csv
       hash: md5
       md5: 769ba530b3629c4c2f9896abf642aefa
       size: 56854345
@@ -13,8 +14,8 @@ stages:
       size: 3619
     - path: src/data/prepare.py
       hash: md5
-      md5: eaf0be70df21c115457b7cbebdfd9909
-      size: 8009
+      md5: 01c2898325de1389567a7af938ebc1e2
+      size: 8111
     - path: src/ml/features.py
       hash: md5
       md5: 3207770959835929199ed8aaffc7c6e4
@@ -22,8 +23,8 @@ stages:
     outs:
     - path: data/metadata/dataset_meta.json
       hash: md5
-      md5: 53e212110b0af7f7722ebf824882723d
-      size: 676
+      md5: b9ccd718e283ca299bbaa519967f527d
+      size: 667
     - path: data/processed/urls_processed.csv
       hash: md5
       md5: 52758544c365936a4d20b5b386110fa5
@@ -31,6 +32,10 @@ stages:
   train:
     cmd: python -m src.training.train
     deps:
+    - path: data/metadata/dataset_meta.json
+      hash: md5
+      md5: b9ccd718e283ca299bbaa519967f527d
+      size: 667
     - path: data/processed/urls_processed.csv
       hash: md5
       md5: 52758544c365936a4d20b5b386110fa5
@@ -45,30 +50,81 @@ stages:
       size: 3619
     - path: src/agent/reasoning.py
       hash: md5
-      md5: 032f9f996bf5a16acf539743ed29c8c9
-      size: 7642
+      md5: 6f4dcf753c2dc99745ff7e1898b58ae6
+      size: 7975
     - path: src/ml/features.py
       hash: md5
       md5: 3207770959835929199ed8aaffc7c6e4
       size: 4002
     - path: src/training/train.py
       hash: md5
-      md5: 69981d8127f38cef0f928e0ccb9b67b3
-      size: 10633
+      md5: 4a3e79859d47bc03206d407abbfb7ee5
+      size: 13574
     outs:
     - path: models/index.json
       hash: md5
-      md5: c00817fefa77ce9855eee538ee6e7806
-      size: 2338
+      md5: ab3f8c41c3b482d567deafaecfc90b35
+      size: 2484
     - path: models/model_bundle.joblib
       hash: md5
-      md5: e7870b19dbabf7c72c0a5b6dfdbd1f55
+      md5: c7d0b57c8f0eb40a699940c1d59d04a3
       size: 5933470
     - path: models/reference_features.csv
       hash: md5
       md5: 1ca0af319db89abf45948cadcf08d489
       size: 23511682
+    - path: models/registry/manifest.json
+      hash: md5
+      md5: baf4ac1554473bd1a4cbf5cf3c067624
+      size: 1174
+    - path: models/registry/versions
+      hash: md5
+      md5: 9c65308dfe097b244fe51e1b1f8997c4.dir
+      size: 5933470
+      nfiles: 1
     - path: reports/evaluation.json
       hash: md5
-      md5: ca52512110fcb1de67b4f7a5e3f03ae8
-      size: 6262
+      md5: 12b081d6f27ddd7ba83c13447390ec8d
+      size: 6263
+  raw_snapshot:
+    cmd: python -m src.data.snapshot --input 
+      data/raw/PhiUSIIL_Phishing_URL_Dataset.csv --output 
+      data/versioned/PhiUSIIL_Phishing_URL_Dataset.csv
+    deps:
+    - path: data/raw/PhiUSIIL_Phishing_URL_Dataset.csv
+      hash: md5
+      md5: 769ba530b3629c4c2f9896abf642aefa
+      size: 56854345
+    - path: src/data/snapshot.py
+      hash: md5
+      md5: 1c1ac0a3a8f2d01557ed771fcfee8f15
+      size: 1536
+    outs:
+    - path: data/versioned/PhiUSIIL_Phishing_URL_Dataset.csv
+      hash: md5
+      md5: 769ba530b3629c4c2f9896abf642aefa
+      size: 56854345
+  rag_index:
+    cmd: python -m src.rag.pipeline build
+    deps:
+    - path: data/processed/urls_processed.csv
+      hash: md5
+      md5: 52758544c365936a4d20b5b386110fa5
+      size: 17177798
+    - path: data/rag_source/analysis_guide.md
+      hash: md5
+      md5: e896b97a9e73a17de03f8d942403ede4
+      size: 754
+    - path: src/rag/pipeline.py
+      hash: md5
+      md5: 360beadbc1dfc60981c77c10fe5c86fb
+      size: 11792
+    outs:
+    - path: data/rag/index_manifest.json
+      hash: md5
+      md5: e003cdcc205a231921afa4d756f3d021
+      size: 519
+    - path: data/rag/vector_index.sqlite3
+      hash: md5
+      md5: 2e70c3959e4b4ccdf5c7514f6dd3e216
+      size: 18063360

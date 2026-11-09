@@ -1,8 +1,15 @@
 stages:
-  prepare:
-    cmd: python -m src.data.prepare --strict
+  raw_snapshot:
+    cmd: python -m src.data.snapshot
     deps:
       - data/raw/PhiUSIIL_Phishing_URL_Dataset.csv
+      - src/data/snapshot.py
+    outs:
+      - data/versioned/dataset.csv
+  prepare:
+    cmd: python -m src.data.prepare --strict -i data/versioned/dataset.csv
+    deps:
+      - data/versioned/dataset.csv
       - src/agent/features.py
       - src/data/prepare.py
       - src/ml/features.py
@@ -13,6 +20,7 @@ stages:
     cmd: python -m src.training.train
     deps:
       - data/processed/urls_processed.csv
+      - data/metadata/dataset_meta.json
       - src/training/train.py
       - src/agent/features.py
       - src/agent/checks.py
@@ -22,6 +30,17 @@ stages:
       - models/model_bundle.joblib
       - models/index.json
       - models/reference_features.csv
+      - models/registry/manifest.json
+      - models/registry/versions
     metrics:
       - reports/evaluation.json:
           cache: false
+  rag_index:
+    cmd: python -m src.rag.pipeline build
+    deps:
+      - data/processed/urls_processed.csv
+      - data/rag_source/analysis_guide.md
+      - src/rag/pipeline.py
+    outs:
+      - data/rag/vector_index.sqlite3
+      - data/rag/index_manifest.json

@@ -11,8 +11,10 @@ COPY requirements-training.txt requirements-runtime.txt .
 RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements-training.txt
 COPY src ./src
 COPY data/raw ./data/raw
+COPY data/rag_source ./data/rag_source
 RUN python -m src.data.prepare --strict \
     && python -m src.training.train \
+    && python -m src.rag.pipeline build \
     && groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --home-dir /app app \
     && mkdir -p /app/data/monitoring /app/data/screenshots \
