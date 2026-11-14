@@ -14,6 +14,7 @@ stages:
     deps:
       - data/processed/hf_training.jsonl
       - src/training/hf_pipeline.py
+      - src/training/metrics.py
     outs:
       - models/huggingface
     metrics:

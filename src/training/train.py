@@ -14,9 +14,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
+
+from src.training.metrics import phishing_precision_recall_f1
 
 try:
     import mlflow
@@ -272,13 +274,15 @@ def train_models() -> dict:
             inference_latency_ms = (
                 (time.perf_counter() - inference_started) * 1000 / len(x_test)
             )
-            precision, recall, f1, _ = precision_recall_fscore_support(
-                y_test, predictions, average="binary", zero_division=0
+            classification_metrics = phishing_precision_recall_f1(
+                y_test.tolist(),
+                predictions.tolist(),
             )
             metrics = {
-                "precision": round(float(precision), 4),
-                "recall": round(float(recall), 4),
-                "f1": round(float(f1), 4),
+                key: round(value, 4)
+                for key, value in classification_metrics.items()
+            }
+            metrics.update({
                 "training_seconds": round(training_seconds, 4),
                 "inference_latency_ms_per_url": round(inference_latency_ms, 4),
                 "estimated_cloud_cost_usd_per_analysis": 0.0,
@@ -286,7 +290,7 @@ def train_models() -> dict:
                     y_test, predictions, labels=[0, 1]
                 ).tolist(),
                 "test_rows": int(len(y_test)),
-            }
+            })
             run_id = _log_run(
                 config,
                 family,
@@ -296,7 +300,7 @@ def train_models() -> dict:
                 dataset_sha256,
             )
             results[family] = metrics
-            candidates.append((float(f1), family, model, run_id))
+            candidates.append((classification_metrics["f1"], family, model, run_id))
 
         best_score, best_family, best_model, best_run_id = max(
             candidates, key=lambda result: (result[0], result[1] == "logistic_regression")

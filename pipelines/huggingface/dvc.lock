@@ -12,8 +12,8 @@ stages:
       size: 17177798
     - path: src/training/hf_pipeline.py
       hash: md5
-      md5: 59b2df42feb30aabf51de523b280975b
-      size: 12217
+      md5: a11947e11b4ead13d7dfb2d43c874246
+      size: 12228
     outs:
     - path: data/metadata/hf_training_meta.json
       hash: md5
@@ -34,15 +34,19 @@ stages:
       size: 776171
     - path: src/training/hf_pipeline.py
       hash: md5
-      md5: 59b2df42feb30aabf51de523b280975b
-      size: 12217
+      md5: a11947e11b4ead13d7dfb2d43c874246
+      size: 12228
+    - path: src/training/metrics.py
+      hash: md5
+      md5: be1a0a90193533e0102a2a3f31f4dc42
+      size: 537
     outs:
     - path: models/huggingface
       hash: md5
-      md5: 9c9f9582144f12646af5fc754411fb06.dir
+      md5: 192d8fed34fcbafdf601eb1ebb13fb55.dir
       size: 268784300
       nfiles: 8
     - path: reports/hf_evaluation.json
       hash: md5
-      md5: e53cb9bb4538f500ed37abb608744b65
+      md5: 96e06f93dc3f940c953e9ff15c711127
       size: 763
