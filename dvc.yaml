@@ -40,7 +40,9 @@ stages:
     deps:
       - data/processed/urls_processed.csv
       - data/rag_source/analysis_guide.md
+      - requirements-runtime.txt
       - src/rag/pipeline.py
     outs:
-      - data/rag/vector_index.sqlite3
+      - data/rag/semantic_vectors.sqlite3
+      - data/rag/embedding_models
       - data/rag/index_manifest.json

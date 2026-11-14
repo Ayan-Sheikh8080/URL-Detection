@@ -27,7 +27,14 @@ def test_analysis_endpoint_returns_real_pipeline_response(monkeypatch):
     monkeypatch.setattr(
         main.rag_store,
         "search",
-        lambda _query, top_k=3: [],
+        lambda _query, top_k=3: [{
+            "id": "test-reference",
+            "source": "analysis_guide.md",
+            "chunk_index": 0,
+            "similarity": 0.8,
+            "label": None,
+            "text": "Retrieved context is supporting evidence only.",
+        }],
     )
 
     response = TestClient(main.app).post(
@@ -41,8 +48,14 @@ def test_analysis_endpoint_returns_real_pipeline_response(monkeypatch):
     assert body["model_family"] == "test_model"
     assert body["browser_ok"] is False
     assert "evidence_summary" in body
-    assert body["rag_retrieval"] == []
-    assert body["agent_rounds"] == 1
+    assert body["rag_retrieval"][0]["source"] == "analysis_guide.md"
+    assert body["retrieved_sources"] == [{
+        "source": "analysis_guide.md",
+        "similarity": 0.8,
+        "id": "test-reference",
+    }]
+    assert any("not ground truth" in reason for reason in body["reasons"])
+    assert body["agent_rounds"] == 2
     assert body["agent_trace"]
 
 

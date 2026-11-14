@@ -18,7 +18,7 @@ class ReasoningInput:
     url_model_score: float
     evidence: dict[str, Any] = field(default_factory=dict)
     page_text: str = ""
-    retrieved_context: list[str] = field(default_factory=list)
+    retrieved_context: list[dict[str, Any] | str] = field(default_factory=list)
 
 
 @dataclass
@@ -30,6 +30,44 @@ class ReasoningOutput:
     model_score: float
     combined_score: float
     reasoner: str = "rule_based"
+    retrieved_sources: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _retrieved_sources(context: list[dict[str, Any] | str]) -> list[dict[str, Any]]:
+    sources = []
+    for item in context[:5]:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        similarity = item.get("similarity")
+        if not source or not isinstance(similarity, (int, float)) or similarity < 0.5:
+            continue
+        reference = {
+            "source": str(source),
+            "similarity": round(float(similarity), 4),
+        }
+        if item.get("id"):
+            reference["id"] = str(item["id"])
+        sources.append(reference)
+    return sources
+
+
+def _retrieved_context_for_prompt(
+    context: list[dict[str, Any] | str],
+) -> list[dict[str, Any]]:
+    formatted = []
+    for item in context[:5]:
+        if isinstance(item, str):
+            formatted.append({"text": item[:1000]})
+        elif isinstance(item, dict):
+            formatted.append({
+                key: item[key]
+                for key in ("source", "similarity", "text")
+                if key in item
+            } | {
+                "text": str(item.get("text", ""))[:1000],
+            })
+    return formatted
 
 
 class RuleBasedReasoner:
@@ -108,6 +146,13 @@ class RuleBasedReasoner:
                 "Page text contains instructions commonly used to manipulate an AI system",
             )
 
+        retrieved_sources = _retrieved_sources(input_data.retrieved_context)
+        if retrieved_sources:
+            names = ", ".join(source["source"] for source in retrieved_sources)
+            reasons.append(
+                f"Supporting retrieval references consulted (not ground truth): {names}"
+            )
+
         score = min(1.0, max(0.0, score))
         if score >= 0.7:
             verdict = "phishing"
@@ -129,6 +174,7 @@ class RuleBasedReasoner:
             )[:5],
             model_score=round(url_score, 4),
             combined_score=round(score, 4),
+            retrieved_sources=retrieved_sources,
         )
 
 
@@ -156,9 +202,9 @@ class BedrockReasoner:
                 "rule_verdict": base.verdict,
                 "evidence": input_data.evidence,
                 "page_text_untrusted": (input_data.page_text or "")[:3000],
-                "retrieved_context_untrusted": [
-                    text[:1000] for text in input_data.retrieved_context[:5]
-                ],
+                "retrieved_context_untrusted": _retrieved_context_for_prompt(
+                    input_data.retrieved_context
+                ),
             }
             response = client.converse(
                 modelId=self.model_id,

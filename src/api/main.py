@@ -240,6 +240,7 @@ async def analyze(request: AnalysisRequest) -> dict:
         "load_ms": round(elapsed_ms, 2),
         "estimated_cloud_cost_usd": estimated_cost,
         "reasoner": reasoning.reasoner,
+        "retrieved_sources": reasoning.retrieved_sources,
         "rag_retrieval": [
             {
                 "source": result["source"],

@@ -1,4 +1,4 @@
-"""Build and query a reproducible SQLite-backed phishing case vector index."""
+"""Build and query a reproducible local semantic vector index."""
 
 import argparse
 import csv
@@ -12,17 +12,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
-from sklearn.feature_extraction.text import HashingVectorizer
 
 ROOT = Path(__file__).resolve().parents[2]
 PROCESSED_PATH = ROOT / "data" / "processed" / "urls_processed.csv"
 SOURCE_DIR = ROOT / "data" / "rag_source"
-INDEX_PATH = ROOT / "data" / "rag" / "vector_index.sqlite3"
+INDEX_PATH = ROOT / "data" / "rag" / "semantic_vectors.sqlite3"
+EMBEDDING_CACHE_PATH = ROOT / "data" / "rag" / "embedding_models"
 MANIFEST_PATH = ROOT / "data" / "rag" / "index_manifest.json"
-VECTOR_SIZE = 2048
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 MAX_EXAMPLES_PER_LABEL = 1024
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 64
+_embedding_model = None
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -42,26 +43,37 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
-def _vectorizer() -> HashingVectorizer:
-    return HashingVectorizer(
-        n_features=VECTOR_SIZE,
-        alternate_sign=False,
-        norm="l2",
-        stop_words=[
-            "labeled",
-            "url",
-            "example",
-            "sanitized",
-            "observed",
-            "page",
-            "indicators",
-            "not",
-            "available",
-            "https",
-            "http",
-        ],
-        token_pattern=r"(?u)[A-Za-z0-9._:/-]+",
-    )
+def _get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as error:
+            raise RuntimeError(
+                "Semantic RAG requires fastembed; "
+                "install the project requirements before indexing or searching"
+            ) from error
+        EMBEDDING_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+        _embedding_model = TextEmbedding(
+            model_name=EMBEDDING_MODEL_NAME,
+            cache_dir=str(EMBEDDING_CACHE_PATH),
+        )
+    return _embedding_model
+
+
+def _encode_texts(texts: list[str], embedder=None) -> np.ndarray:
+    if not texts:
+        return np.empty((0, 0), dtype=np.float32)
+    model = embedder or _get_embedding_model()
+    embeddings = np.asarray(list(model.embed(texts)), dtype=np.float32)
+    if (
+        embeddings.ndim != 2
+        or embeddings.shape[0] != len(texts)
+        or embeddings.shape[1] < 1
+        or not np.isfinite(embeddings).all()
+    ):
+        raise ValueError("The embedding model returned invalid vectors")
+    return embeddings
 
 
 def _dataset_documents(path: Path, max_per_label: int, seed: int) -> list[dict]:
@@ -105,7 +117,7 @@ def _dataset_documents(path: Path, max_per_label: int, seed: int) -> list[dict]:
                 )
                 if row.get(name) not in (None, "")
             ]
-            verdict = "phishing" if label == 1 else "legitimate"
+            verdict = "phishing" if label == 0 else "legitimate"
             text = (
                 f"Labeled {verdict} URL example. Sanitized URL: {safe_url}. "
                 f"Observed page indicators: {', '.join(features) if features else 'not available'}."
@@ -139,6 +151,7 @@ def build_index(
     manifest_path: Path = MANIFEST_PATH,
     max_per_label: int = MAX_EXAMPLES_PER_LABEL,
     seed: int = 42,
+    embedder=None,
 ) -> dict:
     if max_per_label < 1:
         raise ValueError("max_per_label must be positive")
@@ -167,14 +180,17 @@ def build_index(
     if not records:
         raise ValueError("No RAG documents were found to index")
 
-    vectorizer = _vectorizer()
-    embeddings = vectorizer.transform([record["text"] for record in records]).toarray()
-    embeddings = embeddings.astype(np.float32, copy=False)
+    embeddings = _encode_texts(
+        [record["text"] for record in records],
+        embedder,
+    )
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f"{index_path.name}.", suffix=".tmp", dir=index_path.parent
+        prefix=f"{index_path.name}.",
+        suffix=".tmp",
+        dir=index_path.parent,
     )
     os.close(descriptor)
     try:
@@ -191,6 +207,9 @@ def build_index(
                     embedding BLOB NOT NULL
                 )
                 """
+            )
+            connection.execute(
+                "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             connection.executemany(
                 """
@@ -209,6 +228,14 @@ def build_index(
                     for index, record in enumerate(records)
                 ],
             )
+            connection.executemany(
+                "INSERT INTO index_metadata (key, value) VALUES (?, ?)",
+                [
+                    ("embedding_model", EMBEDDING_MODEL_NAME),
+                    ("embedding_dimensions", str(embeddings.shape[1])),
+                    ("distance", "cosine_similarity"),
+                ],
+            )
             connection.execute("CREATE INDEX chunks_source_idx ON chunks(source)")
             connection.commit()
         finally:
@@ -221,8 +248,11 @@ def build_index(
 
     manifest = {
         "schema_version": 1,
-        "embedding_method": "sklearn_hashing_vectorizer",
-        "embedding_dimensions": VECTOR_SIZE,
+        "vector_store": "sqlite_dense_vectors",
+        "embedding_method": "fastembed",
+        "embedding_model": EMBEDDING_MODEL_NAME,
+        "embedding_cache": EMBEDDING_CACHE_PATH.relative_to(ROOT).as_posix(),
+        "embedding_dimensions": int(embeddings.shape[1]),
         "distance": "cosine_similarity",
         "chunk_size_characters": CHUNK_SIZE,
         "chunk_overlap_characters": CHUNK_OVERLAP,
@@ -244,11 +274,11 @@ def build_index(
 
 
 class RagVectorStore:
-    """Persistent local vector store using normalized hashed lexical embeddings."""
+    """Persistent local vector store using dense semantic embeddings."""
 
-    def __init__(self, index_path: Path = INDEX_PATH):
+    def __init__(self, index_path: Path = INDEX_PATH, embedder=None):
         self.index_path = index_path
-        self.vectorizer = _vectorizer()
+        self.embedder = embedder
 
     def search(self, query: str, top_k: int = 3) -> list[dict]:
         if top_k < 1:
@@ -259,18 +289,35 @@ class RagVectorStore:
             raise FileNotFoundError(
                 f"RAG vector index not found at {self.index_path}; run `dvc repro rag_index`"
             )
-        query_vector = self.vectorizer.transform([query]).toarray()[0].astype(np.float32)
+        query_vector = _encode_texts([query], self.embedder)[0]
         results = []
         connection = sqlite3.connect(self.index_path)
         try:
+            row = connection.execute(
+                "SELECT value FROM index_metadata WHERE key = 'embedding_dimensions'"
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Embedding dimension metadata is missing in {self.index_path}")
+            dimensions = int(row[0])
+            if query_vector.size != dimensions:
+                raise ValueError(
+                    f"Query embedding size {query_vector.size} does not match index size {dimensions}"
+                )
             rows = connection.execute(
                 "SELECT id, source, chunk_index, label, text, embedding FROM chunks"
             )
             for record_id, source, chunk_index, label, text, embedding in rows:
                 vector = np.frombuffer(embedding, dtype=np.float32)
-                if vector.size != VECTOR_SIZE:
-                    raise ValueError(f"Invalid embedding size for indexed record {record_id}")
-                similarity = float(np.dot(query_vector, vector))
+                if vector.size != dimensions:
+                    raise ValueError(
+                        f"Invalid embedding size for indexed record {record_id}"
+                    )
+                denominator = np.linalg.norm(query_vector) * np.linalg.norm(vector)
+                similarity = (
+                    float(np.dot(query_vector, vector) / denominator)
+                    if denominator
+                    else 0.0
+                )
                 results.append({
                     "id": record_id,
                     "source": source,
