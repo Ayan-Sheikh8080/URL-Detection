@@ -1,5 +1,6 @@
 node_modules/
 .venv/
+.venv312/
 .env
 *.pkl
 *.h5
@@ -24,6 +25,8 @@ models/reference_features.csv
 models/registry/
 models/huggingface/
 data/rag/vector_index.sqlite3
+data/rag/semantic_vectors.sqlite3
+data/rag/embedding_models/
 data/rag/index_manifest.json
 data/processed/hf_training.jsonl
 data/metadata/hf_training_meta.json

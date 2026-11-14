@@ -9,9 +9,11 @@ class FakeRetriever:
     def search(self, query, top_k=3):
         self.queries.append(query)
         return [{
+            "id": "test-case",
             "text": "Retrieved historical case",
             "similarity": 0.8,
             "source": "test",
+            "chunk_index": 0,
             "label": 1,
         }]
 
@@ -19,9 +21,11 @@ class FakeRetriever:
 class FakeReasoner:
     def __init__(self):
         self.calls = 0
+        self.inputs = []
 
-    def reason(self, _input_data):
+    def reason(self, input_data):
         self.calls += 1
+        self.inputs.append(input_data)
         confidence = 0.5 if self.calls == 1 else 0.95
         return ReasoningOutput(
             verdict="suspicious",
@@ -47,4 +51,11 @@ def test_orchestrator_refines_uncertain_analysis_then_stops():
     assert reasoner.calls == 2
     assert "Unresolved reasoning" in retriever.queries[1]
     assert workflow.retrieved_context[0]["source"] == "test"
+    assert reasoner.inputs[0].retrieved_context[0] == {
+        "id": "test-case",
+        "source": "test",
+        "chunk_index": 0,
+        "similarity": 0.8,
+        "text": "Retrieved historical case",
+    }
     assert [step["agent"] for step in workflow.trace].count("decision_analyst") == 2

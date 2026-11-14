@@ -83,3 +83,31 @@ def test_reasoner_raises_risk_for_cross_domain_credential_collection():
 
     assert result.verdict in {"suspicious", "phishing"}
     assert any("different domain" in reason for reason in result.reasons)
+
+
+def test_reasoner_cites_retrieved_context_without_treating_it_as_ground_truth():
+    reasoner = RuleBasedReasoner()
+    base = reasoner.reason(
+        ReasoningInput(url="https://example.com", url_model_score=0.4)
+    )
+    with_context = reasoner.reason(
+        ReasoningInput(
+            url="https://example.com",
+            url_model_score=0.4,
+            retrieved_context=[{
+                "id": "case-1",
+                "source": "analysis_guide.md",
+                "similarity": 0.82,
+                "text": "Retrieved context",
+            }],
+        )
+    )
+
+    assert with_context.verdict == base.verdict
+    assert with_context.combined_score == base.combined_score
+    assert with_context.retrieved_sources == [{
+        "source": "analysis_guide.md",
+        "similarity": 0.82,
+        "id": "case-1",
+    }]
+    assert any("not ground truth" in reason for reason in with_context.reasons)

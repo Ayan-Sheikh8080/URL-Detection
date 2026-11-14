@@ -23,3 +23,26 @@ stages:
       hash: md5
       md5: 574536c4c349b6e229c792880d5c8bf7
       size: 776171
+  train:
+    cmd: python -m src.training.hf_pipeline train --input 
+      data/processed/hf_training.jsonl --output models/huggingface --metrics 
+      reports/hf_evaluation.json --model-name distilbert-base-uncased --epochs 1
+    deps:
+    - path: data/processed/hf_training.jsonl
+      hash: md5
+      md5: 574536c4c349b6e229c792880d5c8bf7
+      size: 776171
+    - path: src/training/hf_pipeline.py
+      hash: md5
+      md5: 59b2df42feb30aabf51de523b280975b
+      size: 12217
+    outs:
+    - path: models/huggingface
+      hash: md5
+      md5: 9c9f9582144f12646af5fc754411fb06.dir
+      size: 268784300
+      nfiles: 8
+    - path: reports/hf_evaluation.json
+      hash: md5
+      md5: e53cb9bb4538f500ed37abb608744b65
+      size: 763

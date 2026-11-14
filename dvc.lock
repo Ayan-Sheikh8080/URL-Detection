@@ -22,7 +22,7 @@ stages:
     outs:
     - path: data/metadata/dataset_meta.json
       hash: md5
-      md5: 05490a68a7fc9534b209abefb0b1012d
+      md5: f3c8ee1bf51bb290db806437b293f149
       size: 645
     - path: data/processed/urls_processed.csv
       hash: md5
@@ -33,7 +33,7 @@ stages:
     deps:
     - path: data/metadata/dataset_meta.json
       hash: md5
-      md5: 05490a68a7fc9534b209abefb0b1012d
+      md5: f3c8ee1bf51bb290db806437b293f149
       size: 645
     - path: data/processed/urls_processed.csv
       hash: md5
@@ -49,8 +49,8 @@ stages:
       size: 3619
     - path: src/agent/reasoning.py
       hash: md5
-      md5: 6f4dcf753c2dc99745ff7e1898b58ae6
-      size: 7975
+      md5: e9f9244503f3373c19cc9856a2a064ca
+      size: 9651
     - path: src/ml/features.py
       hash: md5
       md5: 3207770959835929199ed8aaffc7c6e4
@@ -62,11 +62,11 @@ stages:
     outs:
     - path: models/index.json
       hash: md5
-      md5: 3c6207c43f82c46e9f8d4bf8302f4600
-      size: 2484
+      md5: 3847bdecbd70bf5e23e58eb49c83c41b
+      size: 2483
     - path: models/model_bundle.joblib
       hash: md5
-      md5: 57851744c8af7c3caa40d47125c484df
+      md5: 98ec19de5c85bb7366e7b9d472f287b3
       size: 5933470
     - path: models/reference_features.csv
       hash: md5
@@ -74,17 +74,17 @@ stages:
       size: 23511682
     - path: models/registry/manifest.json
       hash: md5
-      md5: 49d92200e958a303823f310773263110
+      md5: 9ab3a2193bb3461ed2a18c163582e8ab
       size: 1174
     - path: models/registry/versions
       hash: md5
-      md5: 8d693665423bb55b61e9df733c8850aa.dir
+      md5: 02963ce4436748b2e7fb53df2476afeb.dir
       size: 5933470
       nfiles: 1
     - path: reports/evaluation.json
       hash: md5
-      md5: c939ce67d48b19cbf599a228a11506c8
-      size: 6262
+      md5: d2c51d9812048a5d014e786c38bdec50
+      size: 6261
   raw_snapshot:
     cmd: python -m src.data.snapshot
     deps:
@@ -112,16 +112,25 @@ stages:
       hash: md5
       md5: e896b97a9e73a17de03f8d942403ede4
       size: 754
+    - path: requirements-runtime.txt
+      hash: md5
+      md5: 0fdd41bb27937a0e690208eb3079ca82
+      size: 289
     - path: src/rag/pipeline.py
       hash: md5
-      md5: 360beadbc1dfc60981c77c10fe5c86fb
-      size: 11792
+      md5: 2d762f6dc765f189c02034ca6208d1a3
+      size: 13907
     outs:
+    - path: data/rag/embedding_models
+      hash: md5
+      md5: 6bba1fcb9d95869328f936d92af652c4.dir
+      size: 91102799
+      nfiles: 7
     - path: data/rag/index_manifest.json
       hash: md5
-      md5: e003cdcc205a231921afa4d756f3d021
-      size: 519
-    - path: data/rag/vector_index.sqlite3
+      md5: ede4fbfe05f389d47db52ab6b9c601bf
+      size: 659
+    - path: data/rag/semantic_vectors.sqlite3
       hash: md5
-      md5: 2e70c3959e4b4ccdf5c7514f6dd3e216
-      size: 18063360
+      md5: 132ee854f7e2875adf7ac47af1d333e7
+      size: 4444160
