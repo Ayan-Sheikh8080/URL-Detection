@@ -26,6 +26,7 @@ stages:
       - src/agent/checks.py
       - src/agent/reasoning.py
       - src/ml/features.py
+      - src/training/metrics.py
     outs:
       - models/model_bundle.joblib
       - models/index.json

@@ -55,18 +55,22 @@ stages:
       hash: md5
       md5: 3207770959835929199ed8aaffc7c6e4
       size: 4002
+    - path: src/training/metrics.py
+      hash: md5
+      md5: be1a0a90193533e0102a2a3f31f4dc42
+      size: 537
     - path: src/training/train.py
       hash: md5
-      md5: 4a3e79859d47bc03206d407abbfb7ee5
-      size: 13574
+      md5: f4077a0fefb64a6286bf07006d53df16
+      size: 13617
     outs:
     - path: models/index.json
       hash: md5
-      md5: 3847bdecbd70bf5e23e58eb49c83c41b
+      md5: 5d298139d90a75542d2c7876d573174d
       size: 2483
     - path: models/model_bundle.joblib
       hash: md5
-      md5: 98ec19de5c85bb7366e7b9d472f287b3
+      md5: fb46ff0f927649e8d44b8679d23f00d3
       size: 5933470
     - path: models/reference_features.csv
       hash: md5
@@ -74,17 +78,17 @@ stages:
       size: 23511682
     - path: models/registry/manifest.json
       hash: md5
-      md5: 9ab3a2193bb3461ed2a18c163582e8ab
+      md5: 05dc70f88b6892f70b1f026acf9852d4
       size: 1174
     - path: models/registry/versions
       hash: md5
-      md5: 02963ce4436748b2e7fb53df2476afeb.dir
+      md5: c60f5520ad41fe047c9b1526f01afb03.dir
       size: 5933470
       nfiles: 1
     - path: reports/evaluation.json
       hash: md5
-      md5: d2c51d9812048a5d014e786c38bdec50
-      size: 6261
+      md5: 7b7dae4d57c0196bbe41bf434d0d7ebb
+      size: 6264
   raw_snapshot:
     cmd: python -m src.data.snapshot
     deps:

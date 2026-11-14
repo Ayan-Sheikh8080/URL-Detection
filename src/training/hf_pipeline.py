@@ -9,11 +9,15 @@ import random
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
+
+from src.training.metrics import phishing_precision_recall_f1
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = ROOT / "data" / "processed" / "urls_processed.csv"
+HF_ID_TO_LABEL = {0: "phishing", 1: "legitimate"}
+HF_LABEL_TO_ID = {label: index for index, label in HF_ID_TO_LABEL.items()}
 
 
 def format_example(row: dict[str, str]) -> str:
@@ -142,8 +146,8 @@ def train_hf_model(
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
         num_labels=2,
-        id2label={0: "legitimate", 1: "phishing"},
-        label2id={"legitimate": 0, "phishing": 1},
+        id2label=HF_ID_TO_LABEL,
+        label2id=HF_LABEL_TO_ID,
     )
 
     class URLDataset(torch.utils.data.Dataset):
@@ -174,17 +178,13 @@ def train_hf_model(
         import numpy as np
 
         predicted = np.argmax(prediction.predictions, axis=1)
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            prediction.label_ids,
-            predicted,
-            average="binary",
-            zero_division=0,
+        phishing_metrics = phishing_precision_recall_f1(
+            prediction.label_ids.tolist(),
+            predicted.tolist(),
         )
         return {
             "accuracy": accuracy_score(prediction.label_ids, predicted),
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
+            **phishing_metrics,
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
