@@ -1,0 +1,11 @@
+groups:
+  - name: url-detection-drift
+    rules:
+      - alert: FeatureDriftDetected
+        expr: url_analyzer_psi_score > 0.25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Feature drift detected"
+          description: "PSI has remained above 0.25 for five minutes."

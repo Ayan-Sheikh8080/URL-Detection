@@ -50,7 +50,17 @@ browser_failures = Counter(
     "Number of analyses where browser evidence could not be collected",
     registry=prometheus_registry,
 )
+psi_score_gauge = Gauge(
+    "url_analyzer_psi_score",
+    "Latest overall Population Stability Index score",
+    registry=prometheus_registry,
+)
 
+drift_detected_gauge = Gauge(
+    "url_analyzer_drift_detected",
+    "Whether feature drift has been detected (1=yes, 0=no)",
+    registry=prometheus_registry,
+)
 
 class AnalysisRequest(BaseModel):
     url: str = Field(min_length=1, max_length=8192)
@@ -269,16 +279,27 @@ def screenshot(filename: str):
 def monitoring_stats() -> dict:
     return monitoring.get_stats()
 
+def calculate_monitoring_drift() -> dict:
+    reference = model_registry.reference_features()
+    recent = monitoring.recent_features()
+
+    result = check_feature_drift(reference, recent)
+
+    psi_score_gauge.set(float(result.get("psi_score", 0.0)))
+    drift_detected_gauge.set(
+        1 if result.get("drift_detected", False) else 0
+    )
+
+    return result
 
 @app.get("/api/monitoring/drift")
 def monitoring_drift() -> dict:
-    reference = model_registry.reference_features()
-    recent = monitoring.recent_features()
-    return check_feature_drift(reference, recent)
-
+    return calculate_monitoring_drift()
 
 @app.get("/metrics")
 def prometheus_metrics() -> PlainTextResponse:
+    calculate_monitoring_drift()
+
     return PlainTextResponse(
         generate_latest(prometheus_registry).decode("utf-8"),
         media_type=CONTENT_TYPE_LATEST,
