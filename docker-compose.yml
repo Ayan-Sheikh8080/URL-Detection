@@ -9,7 +9,13 @@ services:
       PORT: "8000"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       BROWSER_SANDBOX_URL: http://sandbox:8080
-      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-2}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-ap-southeast-2}
+      AWS_PROFILE: default
+      AWS_SDK_LOAD_CONFIG: "1"
+      AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+      AWS_CONFIG_FILE: /aws/config
+      BEDROCK_MODEL_ID: au.anthropic.claude-haiku-4-5-20251001-v1:0
       BROWSER_TIMEOUT_MS: "8000"
     depends_on:
       sandbox:
@@ -27,6 +33,7 @@ services:
     volumes:
       - screenshots:/app/data/screenshots
       - monitoring:/app/data/monitoring
+      - "${AWS_CONFIG_DIR}:/aws:ro"
     healthcheck:
       test:
         - CMD

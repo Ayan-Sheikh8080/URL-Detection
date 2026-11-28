@@ -117,7 +117,7 @@ def _dataset_documents(path: Path, max_per_label: int, seed: int) -> list[dict]:
                 )
                 if row.get(name) not in (None, "")
             ]
-            verdict = "phishing" if label == 0 else "legitimate"
+            verdict = "legitimate" if label == 0 else "phishing"
             text = (
                 f"Labeled {verdict} URL example. Sanitized URL: {safe_url}. "
                 f"Observed page indicators: {', '.join(features) if features else 'not available'}."
