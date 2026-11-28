@@ -1,0 +1,103 @@
+{
+  "family": "url-detection-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::589965288084:role/service-role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::589965288084:role/url-detection-task-role",
+  "containerDefinitions": [
+    {
+      "name": "browser-sandbox",
+      "image": "589965288084.dkr.ecr.ap-southeast-2.amazonaws.com/phishing-url-detection-sandbox:v1",
+      "essential": true,
+      "cpu": 512,
+      "memory": 1024,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "url-detection",
+          "awslogs-region": "ap-southeast-2",
+          "awslogs-stream-prefix": "sandbox"
+        }
+      }
+    },
+    {
+      "name": "api",
+      "image": "589965288084.dkr.ecr.ap-southeast-2.amazonaws.com/phishing-url-detection-api-v2:v1",
+      "essential": true,
+      "cpu": 1536,
+      "memory": 3072,
+      "dependsOn": [
+        {
+          "containerName": "browser-sandbox",
+          "condition": "HEALTHY"
+        }
+      ],
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "ap-southeast-2"
+        },
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "ap-southeast-2"
+        },
+        {
+          "name": "BEDROCK_MODEL_ID",
+          "value": "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+        },
+        {
+          "name": "BROWSER_SANDBOX_URL",
+          "value": "http://localhost:8080"
+        },
+        {
+          "name": "BROWSER_TIMEOUT_MS",
+          "value": "8000"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 180
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "url-detection",
+          "awslogs-region": "ap-southeast-2",
+          "awslogs-stream-prefix": "api"
+        }
+      }
+    }
+  ]
+}
