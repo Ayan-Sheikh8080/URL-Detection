@@ -140,6 +140,7 @@ def analyze_forms_for_suspicion(forms: List[Dict[str, Any]], final_domain: str) 
     return features
 
 
+
 def check_for_prompt_injection(page_text: str) -> Dict[str, Any]:
     """Check page text for prompt injection attempts."""
     features = {
@@ -147,33 +148,73 @@ def check_for_prompt_injection(page_text: str) -> Dict[str, Any]:
         'injection_type': None,
         'suspicious_patterns': [],
     }
-    
+
     try:
         injection_patterns = [
+            # Instruction override attempts
             r'\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions\b',
             r'\b(?:override|disregard)\s+(?:the\s+)?(?:system|previous)\s+prompt\b',
-            r'\b(?:reveal|print|show)\s+(?:the\s+)?system\s+prompt\b',
             r'\byou\s+are\s+now\s+(?:the\s+)?(?:system|assistant)\b',
             r'\bdo\s+not\s+follow\s+(?:the\s+)?(?:system|safety)\s+instructions\b',
+
+            # System prompt disclosure attempts
+            r'\b(?:reveal|print|show|expose|disclose)\s+(?:the\s+)?(?:hidden\s+)?system\s+prompt\b',
+
+            # Verdict manipulation attempts
+            r'\b(?:change|modify|override)\s+(?:the\s+)?(?:verdict|classification|prediction)\s+to\s+(?:safe|legitimate|benign)\b',
+            r'\bmark\s+(?:this|the\s+website|the\s+url|the\s+site)\s+(?:as\s+)?(?:safe|legitimate|benign)\b',
+
+            # Evidence manipulation attempts
+            r'\bhide\s+(?:the\s+)?(?:password|login|credential)\s+form\s+(?:from\s+)?(?:the\s+)?evidence\b',
+            r'\b(?:hide|remove|suppress|omit)\s+(?:the\s+)?(?:browser\s+)?evidence\b',
+
+            # ML/model manipulation attempts
+            r'\b(?:disregard|ignore|override)\s+(?:the\s+)?(?:ml|machine\s+learning|model)\s+(?:score|prediction|result|output)\b',
         ]
-        
+
         page_lower = page_text.lower()
-        
+
         for pattern in injection_patterns:
             if re.search(pattern, page_lower, re.IGNORECASE | re.DOTALL):
                 features['suspicious_patterns'].append(pattern)
-        
+
         if features['suspicious_patterns']:
             features['prompt_injection_detected'] = True
-            # Determine injection type
-            if any('ignore' in p.lower() for p in features['suspicious_patterns']):
-                features['injection_type'] = 'instruction_override'
-            elif any('system' in p.lower() for p in features['suspicious_patterns']):
+
+            matched_patterns = features['suspicious_patterns']
+
+            if any(
+                keyword in pattern
+                for pattern in matched_patterns
+                for keyword in ('verdict', 'classification', 'prediction')
+            ):
+                features['injection_type'] = 'verdict_manipulation'
+
+            elif any(
+                keyword in pattern
+                for pattern in matched_patterns
+                for keyword in ('password', 'evidence', 'credential')
+            ):
+                features['injection_type'] = 'evidence_manipulation'
+
+            elif any(
+                keyword in pattern
+                for pattern in matched_patterns
+                for keyword in ('system', 'prompt')
+            ):
                 features['injection_type'] = 'system_prompt_leak'
+
+            elif any(
+                keyword in pattern
+                for pattern in matched_patterns
+                for keyword in ('ml', 'machine learning', 'model')
+            ):
+                features['injection_type'] = 'model_manipulation'
+
             else:
-                features['injection_type'] = 'suspicious_pattern'
-    
+                features['injection_type'] = 'instruction_override'
+
     except Exception as e:
         print(f"Error checking prompt injection: {e}")
-    
+
     return features
